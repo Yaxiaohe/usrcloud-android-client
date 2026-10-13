@@ -18,15 +18,19 @@
 
 ## 二、编译
 
-前置：JDK 17、Android SDK（compileSdk 34）、Gradle 8.x。
+前置：JDK 17、Android SDK（compileSdk 34）。Gradle 不用装，仓库自带 Wrapper（8.7）。
 
 ```bash
 # 告知 SDK 位置（该文件不入库）
-echo "sdk.dir=/path/to/Android/sdk" > local.properties
+echo "sdk.dir=/path/to/Android/sdk" > local.properties      # macOS / Linux
+echo sdk.dir=C:\\path\\to\\Android\\sdk  > local.properties # Windows
 
 # 构建
-build.bat assembleRelease          # Windows
+./gradlew assembleRelease          # macOS / Linux
+build.bat assembleRelease          # Windows（自动定位 JDK 17 与 SDK）
 ```
+
+首次运行 Wrapper 会下载 Gradle 8.7（约 120 MB），之后走缓存。
 
 产物：`app/build/outputs/apk/release/app-release.apk`
 
