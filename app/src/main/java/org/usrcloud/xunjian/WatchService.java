@@ -1,0 +1,151 @@
+package org.usrcloud.xunjian;
+
+import android.app.Notification;
+import android.app.Service;
+import android.content.Context;
+import android.content.Intent;
+import android.content.pm.ServiceInfo;
+import android.os.Build;
+import android.os.IBinder;
+import android.util.Log;
+
+/**
+ * 监控前台服务。【v0.20 新增】
+ *
+ * <p>【为什么必须有这个 —— 用户反馈「通知问题没得到解决」的真因】
+ *
+ * <p>原来定时巡检跑在一个进程内的 {@code ScheduledExecutorService} 上
+ * （Watch.setEnabled 里 scheduleWithFixedDelay）。
+ * 这东西的生命周期等于 app 进程：<b>用户把 app 划掉或系统回收内存，
+ * 巡检就停了，系统通知自然一条都不会再弹。</b>
+ *
+ * <p>更麻烦的是它给出的假象：只要 app 还开着，站内提醒列表
+ * （Watch.alerts）会正常累积，界面上能看到一条条提醒，
+ * 唯独下拉通知栏是空的。用户看到的就是「提醒有、通知没有」，
+ * 反复检查权限、检查规则、检查渠道都没用 —— 因为问题根本不在通知那一层。
+ *
+ * <p>Android 的标准解法是前台服务：给一个常驻通知换掉进程被杀的优先级，
+ * 让调度器在 app 没打开时照样能跑。
+ *
+ * <p>【为什么必须诚实告知用户】前台服务会在下拉栏留一条常驻通知，
+ * 这是 Android 的强制要求，不能悄悄干。所以：
+ * <ul>
+ *   <li>渠道 importance 用 MIN —— 不响、不震动、不弹横幅，尽量不打扰</li>
+ *   <li>文案写清楚「保持监控运行中，可以下拉关闭」，
+ *       避免用户以为是异常提醒又点进来</li>
+ * </ul>
+ *
+ * <p>targetSdk 33 起，后台启动前台服务受限。
+ * 这里只从 MainActivity（前台）里启动，符合系统约束。
+ */
+public class WatchService extends Service {
+
+    private static final String TAG = "watchsvc";
+    private static final String CH_RUN = "patrol_run";
+    private static final int ID_RUN = 9001;
+
+    public static void start(Context ctx) {
+        try {
+            Intent it = new Intent(ctx, WatchService.class);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                ctx.startForegroundService(it);
+            } else {
+                ctx.startService(it);
+            }
+        } catch (Throwable t) {
+            /* 起不来不能连带影响监控本身，降级成纯进程内调度 */
+            Log.w(TAG, "前台服务启动失败，退回进程内调度: " + t);
+            Core.log("[监控] 前台服务启动失败，app 退到后台后巡检会停止: " + t);
+        }
+    }
+
+    public static void stop(Context ctx) {
+        try {
+            ctx.stopService(new Intent(ctx, WatchService.class));
+        } catch (Throwable ignored) {
+        }
+    }
+
+    @Override
+    public IBinder onBind(Intent intent) {
+        return null;
+    }
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        // 必须在 5 秒内调 startForeground，否则系统会 ANR 并杀掉服务
+        try {
+            startForeground(ID_RUN, buildRun());
+        } catch (Throwable t) {
+            Log.w(TAG, "startForeground 失败: " + t);
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+
+        /* 关键：真正的巡检调度仍然是 Watch.SCHED，
+           服务只负责「让进程活着」。这里把监控开关打开，
+           调度器就在这个被保活的进程里持续跑。 */
+        try {
+            Watch.setEnabled(true);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForeground(ID_RUN, buildRun());
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "开启监控失败: " + t);
+        }
+
+        // START_STICKY：进程被系统杀掉后系统会重建服务，监控能自动恢复
+        return START_STICKY;
+    }
+
+    @Override
+    public void onDestroy() {
+        Log.i(TAG, "监控服务已停止");
+        super.onDestroy();
+    }
+
+    /** 常驻通知：走独立渠道，MIN 优先级，安静不打扰。 */
+    private Notification buildRun() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                android.app.NotificationManager nm =
+                        (android.app.NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+                if (nm != null && nm.getNotificationChannel(CH_RUN) == null) {
+                    android.app.NotificationChannel c =
+                            new android.app.NotificationChannel(
+                                    CH_RUN, "监控运行中",
+                                    android.app.NotificationManager.IMPORTANCE_MIN);
+                    c.setDescription("保持后台定时巡检运行，设备异常时才能弹通知");
+                    c.setShowBadge(false);
+                    c.enableVibration(false);
+                    c.setSound(null, null);
+                    nm.createNotificationChannel(c);
+                }
+            }
+
+            Notification.Builder b = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                    ? new Notification.Builder(this, CH_RUN)
+                    : new Notification.Builder(this);
+            b.setSmallIcon(R.drawable.ic_stat_warn);
+            b.setContentTitle("巡站监控运行中");
+            b.setContentText("保持后台定时巡检，设备异常时才会弹通知");
+            b.setStyle(new Notification.BigTextStyle().bigText(
+                    "保持后台定时巡检，设备异常时才会弹通知。"
+                    + "不需要监控时，在「监控」页关掉开关即可。"));
+            b.setOngoing(true);      // 常驻，用户划不掉
+            b.setShowWhen(false);
+            b.setPriority(Notification.PRIORITY_MIN);
+            b.setWhen(System.currentTimeMillis());
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                b.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE);
+            }
+            return b.build();
+        } catch (Throwable t) {
+            Log.w(TAG, "构造常驻通知失败: " + t);
+            Notification.Builder b = new Notification.Builder(this)
+                    .setSmallIcon(R.drawable.ic_stat_warn)
+                    .setContentTitle("巡站监控运行中");
+            return b.build();
+        }
+    }
+}

@@ -1,0 +1,666 @@
+/* 历史数据页 */
+var HOURS = [
+  { v: 6, t: '6小时' }, { v: 24, t: '24小时' }, { v: 72, t: '3天' },
+  { v: 168, t: '7天' }, { v: 720, t: '30天' }
+];
+var PAL = ['#2b62e0', '#12a19a', '#d97a29', '#7c5cff', '#e0518a', '#2f9e44'];
+var hSrc = 'local';
+/* 【v0.28】默认 24 小时。原来默认 7 天：一是读的文件多、出图慢，
+   二是 7 天的曲线挤在一起看不出细节，真要查长期趋势再点一下就好。 */
+var hHours = 24;
+var hOn = {};        // 变量名 -> true（勾选显示）
+var hAcc = null;      // null=未选择；''=全部账号；否则账号名
+var hDevLabel = '';   // 【v0.28】已选设备的显示名（本地直选时用）
+
+function V_hist() {
+  if (G.tab !== 'hist') return;
+  var s = '<div class="card"><h2>数据来源</h2><div class="seg" id="hSeg">' +
+    '<div class="s' + (hSrc === 'local' ? ' on' : '') + '" data-src="local">本地记录</div>' +
+    '<div class="s' + (hSrc === 'cloud' ? ' on' : '') + '" data-src="cloud">平台云端</div>' +
+    '</div><div class="muted tiny" style="margin-top:9px" id="hTip">' +
+    (hSrc === 'local' ? '读取监控引擎自动落盘的 CSV，不消耗平台请求。'
+      : '走平台历史库接口查询，会消耗请求额度。') + '</div></div>';
+
+  s += '<div class="card"><h2>时间范围</h2><div class="seg" id="hhSeg">' +
+    HOURS.map(function (x) {
+      return '<div class="s' + (hHours === x.v ? ' on' : '') + '" data-hh="' + x.v + '">' +
+        x.t + '</div>';
+    }).join('') + '</div></div>';
+
+  /* 汇总模式：hAcc = '' 表示「全部账号」，此时后端跨账号汇总所有变量 */
+  var allAcc = (hAcc === '');
+  var accLabel = allAcc ? '全部账号（汇总所有设备）' : hAcc;
+
+  if (hSrc === 'local') {
+    /* 【v0.28】本地记录：两步出图。
+       原来要「选账号 → 读取设备 → 选设备 → 查询」四步，其中「读取设备」
+       还是走平台接口拉全量设备（耗额度，且线上有的设备本地未必有记录，
+       点进去是张空图）。现在设备列表直接从本地 CSV 里提（histDevs），
+       跨账号一次列全，点一台就出图。
+       账号不单独选了 —— 设备行里带着账号名，搜索框也能按账号搜。 */
+    s += '<div class="card"><h2>选择设备</h2>' +
+      '<button class="pick" id="hPick"><span class="pf' +
+      (hDevLabel ? '' : ' ph') + '">' +
+      esc(hDevLabel || '点击选择设备') + '</span><span class="ar">›</span></button>' +
+      '<div class="muted tiny" style="margin-top:9px">' +
+      (allAcc
+        ? '正在汇总全部设备的记录，变量名会带「设备名·」前缀。'
+        : '列表直接来自本地落盘记录，不发平台请求；可以按站名、编号或账号搜索。') +
+      '</div>' +
+      '<div class="row" style="margin-top:10px">' +
+      '<button class="sm" id="hAll">全部设备汇总</button>' +
+      (hDevLabel ? '<button class="sm" id="hSwap">换一台设备</button>' : '') +
+      '</div></div>';
+  } else {
+    s += '<div class="card"><h2>选择账号</h2>' +
+      '<button class="pick" id="hAcc"><span class="pf' + (accLabel ? '' : ' ph') + '">' +
+      esc(accLabel || '点击选择账号') + '</span><span class="ar">›</span></button>' +
+      '<div class="muted tiny" style="margin-top:9px">' +
+      (allAcc
+        ? '正在汇总全部启用账号下所有设备的记录，变量名会带「设备名·」前缀。'
+        : '点上面一行可以换账号，列表里有「全部账号」。') + '</div>' +
+      '<div class="row" style="margin-top:10px">' +
+      '<button class="sm" id="hLoad">⬇ 读取设备</button>' +
+      '<button class="sm" id="hQuery"' + (hAcc === null ? ' disabled' : '') + '>查询曲线</button></div>';
+
+    /* 选了具体账号且是平台云端时，才需要列设备（云端按设备查） */
+    if (!allAcc && G.histAcc && hSrc === 'cloud') {
+      s += '<div class="row" style="margin-top:10px"><select id="hDev" style="flex:1">' +
+        (G.devCache[G.histAcc] || []).map(function (d) {
+          return '<option value="' + esc(d.no) + '"' + (d.no === G.histNo ? ' selected' : '') +
+            '>' + esc(d.name) + '</option>';
+        }).join('') + '</select></div>';
+    }
+    s += '</div>';
+  }
+
+  /* 结果区 */
+  s += '<div id="hRes">' + histResultHtml() + '</div>';
+
+  el('main').innerHTML = s;
+  bindHist();
+}
+
+function histResultHtml() {
+  if (!G.hist) return '';
+  var r = G.hist;
+  if (r.error) return '<div class="bar w">⚠ ' + esc(r.error) + '</div>';
+  var vars = r.vars || [];
+  if (!vars.length || !r.count) {
+    return '<div class="card"><div class="empty">' +
+      (hAcc === '' ? '全部账号在所选范围内没有历史数据' : '该设备在所选范围内没有历史数据') +
+      '<br><span class="tiny">' + (hSrc === 'local'
+        ? '本地记录需要先启动「监控」并跑过巡检'
+        : '换个时间范围再试') + '</span></div></div>';
+  }
+  var keys = Object.keys(r.series || {});
+  var on = keys.filter(function (k) { return hOn[k]; });
+  if (!on.length) on = keys.slice(0, 3);
+  if (on.length > 6) on = on.slice(0, 6);
+
+  /* 全部账号汇总时变量会非常多，只列出前若干个，避免刷屏 */
+  var shown = keys.slice(0, 60);
+  var title = (hAcc === '')
+      ? '全部账号'
+      : (G.histName || G.histNo || '');
+  var s = '<div class="card"><h2>' + esc(title) +
+    '<span class="r">' + r.count + ' 个变量 · ' + r.hours + '小时 · ' +
+    (r.source === 'cloud' ? '云端' : '本地') + '</span></h2>';
+
+  if (keys.length > shown.length) {
+    s += '<div class="bar w" style="margin-bottom:10px">⚠ 共 ' + keys.length +
+      ' 个变量，图表只列前 ' + shown.length + ' 个。请缩小时间范围或指定单个账号。</div>';
+  }
+  /* 图表放在变量选项上面：先看图，再决定要看哪几条线，不用往下翻 */
+  s += '<canvas class="cv" id="hCv" width="700" height="300"></canvas>';
+  s += '<div class="lg" id="hLg"></div>';
+  s += '<div class="muted tiny" style="margin-top:9px" id="hAx"></div>';
+
+  s += '<div class="muted tiny" style="margin:14px 0 8px">点变量名可显示/隐藏曲线' +
+    (keys.length > shown.length ? '（仅前 ' + shown.length + ' 个）' : '') + '</div>';
+  s += '<div class="row wrap">';
+  shown.forEach(function (k) {
+    s += '<span class="vchip' + (on.indexOf(k) >= 0 ? ' on' : '') + '" data-var="' +
+      esc(k) + '">' + esc(k) + '</span>';
+  });
+  s += '</div></div>';
+
+  s += '<div class="two"><button class="sm" id="hSave">⬇ 立即落盘</button>' +
+    '<button class="sm" id="hFiles">📁 历史文件</button></div>';
+  return s;
+}
+
+function bindHist() {
+  var m = el('main');
+
+  m.querySelectorAll('[data-src]').forEach(function (n) {
+    n.onclick = function () {
+      hSrc = n.getAttribute('data-src');
+      G.hist = null;
+      hOn = {};
+      /* 切到平台云端时，「全部账号」不可用（云端必须按设备查），自动退回未选 */
+      if (hSrc === 'cloud' && hAcc === '') hAcc = null;
+      V_hist();
+      /* 已经选过设备就顺手重查一次，省得切回来还要再点一遍 */
+      if (hSrc === 'local' && G.histNo) doQuery();
+    };
+  });
+
+  m.querySelectorAll('[data-hh]').forEach(function (n) {
+    n.onclick = function () {
+      hHours = parseInt(n.getAttribute('data-hh'), 10);
+      /* 必须先 V_hist() 重画分段控件，否则 data-hh 的 .on 高亮不会跟着变，
+         看上去就是"点了没反应"。原来只调 doQuery()，高亮永远停在旧值。 */
+      V_hist();
+      if (G.hist) doQuery();
+    };
+  });
+
+  /* 【v0.28】本地：一步打开设备列表，点中即查 */
+  var pk = el('hPick');
+  if (pk) pk.onclick = pickLocalDevice;
+
+  var sw = el('hSwap');
+  if (sw) sw.onclick = pickLocalDevice;
+
+  var ha = el('hAll');
+  if (ha) ha.onclick = function () {
+    hAcc = '';
+    hDevLabel = '';
+    G.histAcc = null;
+    G.histNo = null;
+    G.hist = null;
+    hOn = {};
+    V_hist();
+    doQuery();
+  };
+
+  /* 账号选择：用 app 自己的选择器，不用原生 <select>（系统样式割裂） */
+  var pa = el('hAcc');
+  if (pa) pa.onclick = function () {
+    var accs = G.accounts.filter(function (a) { return a.enabled; });
+    if (!accs.length) { toast('没有启用的账号'); return; }
+    /* 平台云端不支持汇总（一次拉几十台会把请求额度打爆，后端也会直接拒），
+       所以那个选项干脆不给 —— 列出来让用户点了再报错是条死路。 */
+    var items = (hSrc === 'cloud' ? [] : [
+      { name: '全部账号', sub: '汇总所有启用账号下所有设备的记录', v: '' }
+    ]).concat(accs.map(function (a) {
+      return { name: a.name, sub: '只看这个账号', v: a.name };
+    }));
+    openBox('选择账号',
+      '<div id="haList">' + items.map(function (x) {
+        var on = (hAcc !== null && hAcc === x.v);
+        return '<div class="item' + (on ? ' on' : '') + '" data-ha="' + esc(x.v) + '">' +
+          '<div class="t">' + esc(x.name) + '</div>' +
+          '<div class="s">' + esc(x.sub) + '</div></div>';
+      }).join('') + '</div>',
+      null);
+    el('haList').querySelectorAll('[data-ha]').forEach(function (n) {
+      n.onclick = function () {
+        hAcc = n.getAttribute('data-ha');
+        /* 换账号等于换范围，清掉上次的设备选择与结果 */
+        G.histAcc = null;
+        G.histNo = null;
+        G.hist = null;
+        hOn = {};
+        closeBox();
+        V_hist();
+        if (hAcc === '') doQuery();     // 全部账号 = 汇总，直接出结果
+      };
+    });
+  };
+
+  var ld = el('hLoad');
+  if (ld) ld.onclick = function () {
+    if (hAcc === null) { toast('先选账号'); return; }
+    ld.disabled = true;
+    ld.textContent = '读取中…';
+    setTimeout(function () {
+      if (hAcc === '') {
+        /* 全部账号：设备列表没意义，直接汇总查询 */
+        ld.disabled = false;
+        ld.textContent = '⬇ 读取设备';
+        if (G.tab !== 'hist') return;
+        G.histAcc = null;
+        G.histNo = null;
+        doQuery();
+        return;
+      }
+      var r = api('devices', { name: hAcc });
+      ld.disabled = false;
+      ld.textContent = '⬇ 读取设备';
+      if (G.tab !== 'hist') return;
+      if (!r.ok) { toast(r.msg || '读取失败'); return; }
+      G.devCache[hAcc] = r.devices || [];
+      G.histAcc = hAcc;
+      if (!G.devCache[hAcc].length) { toast('该账号下没有设备'); return; }
+      if (hSrc === 'cloud') {
+        G.histNo = G.devCache[hAcc][0].no;
+        G.histName = G.devCache[hAcc][0].name;
+        V_hist();
+        doQuery();
+      } else {
+        V_hist();
+        toast('已载入 ' + G.devCache[hAcc].length + ' 台设备，点「查询曲线」选设备');
+      }
+    }, 30);
+  };
+
+  var qb = el('hQuery');
+  if (qb) qb.onclick = function () {
+    if (hAcc === null) { toast('先选账号'); return; }
+    if (hAcc === '') { doQuery(); return; }    // 全部账号：不用选设备
+    pickDevice();
+  };
+
+  m.querySelectorAll('[data-var]').forEach(function (n) {
+    n.onclick = function () {
+      var k = n.getAttribute('data-var');
+      hOn[k] = !hOn[k];
+      n.className = 'vchip' + (hOn[k] ? ' on' : '');
+      drawChart();
+    };
+  });
+
+  var sv = el('hSave');
+  if (sv) sv.onclick = function () {
+    var r = api('histSave', {});
+    toast(r.ok ? '已落盘到本地 CSV' : (r.msg || '落盘失败'));
+  };
+
+  var fl = el('hFiles');
+  if (fl) fl.onclick = showFiles;
+
+  var hd = el('hDev');
+  if (hd) hd.onchange = function () {
+    G.histNo = this.value;
+    G.histName = this.options[this.selectedIndex].text;
+    doQuery();
+  };
+
+  drawChart();
+}
+
+/* 设备列表项 HTML。抽成函数是为了搜索时能原样重画，不用两套写法。 */
+function pdItemHtml(d, on) {
+  return '<div class="item' + (on ? ' on' : '') + '" data-pd="' + esc(d.no) + '">' +
+    '<div class="t">' + esc(d.name) + '</div>' +
+    '<div class="s mono tiny">' + esc(d.no) + '</div></div>';
+}
+
+/* 弹窗内的设备列表：按关键字过滤。
+   站点一多（截图里几十台）光靠滚动找太慢，所以加搜索框。
+   设备名和编号都能搜，编号单独能排上是因为很多站名带 _DRPC02H200C90III-02-3
+   这种后缀，用户手上往往只有编号。 */
+function pdListHtml(ds, kw, sel) {
+  var list = ds;
+  if (kw) {
+    var q = kw.toLowerCase();
+    list = ds.filter(function (d) {
+      return ((d.name || '') + ' ' + (d.no || '')).toLowerCase().indexOf(q) >= 0;
+    });
+  }
+  if (!list.length) {
+    return '<div class="empty">' + (kw ? '没有匹配「' + esc(kw) + '」的设备' : '没有设备') + '</div>';
+  }
+  return list.map(function (d) {
+    return pdItemHtml(d, d.no === sel);
+  }).join('');
+}
+
+/* 【v0.28】本地设备直选：点一台就出图。
+   列表来自 histDevs（扫本地 CSV），不发平台请求。
+   搜索同时匹配站名、编号、账号 —— 手里只有编号也能搜到，
+   想只看某条线路直接打线路名（账号名）就行。 */
+function hdItemHtml(d, on) {
+  return '<div class="item' + (on ? ' on' : '') + '" data-hd="' + esc(d.no) + '" data-ha="' +
+    esc(d.acc) + '" data-hn="' + esc(d.name || '') + '">' +
+    '<div class="t">' + esc(d.name || d.no) + '</div>' +
+    '<div class="s">' + esc(d.acc) + ' · ' + esc(d.no) + '</div>' +
+    '<div class="s mono tiny">最后记录 ' + esc(d.last || '-') + ' · ' +
+    (d.n || 0) + ' 行</div></div>';
+}
+
+function hdListHtml(ds, kw, sel) {
+  var list = ds;
+  if (kw) {
+    var q = kw.toLowerCase();
+    list = ds.filter(function (d) {
+      return ((d.name || '') + ' ' + (d.no || '') + ' ' + (d.acc || ''))
+        .toLowerCase().indexOf(q) >= 0;
+    });
+  }
+  if (!list.length) {
+    return '<div class="empty">' + (kw ? '没有匹配「' + esc(kw) + '」的设备'
+      : '本地还没有落盘记录<br><span class="tiny">启动「监控」跑一次巡检后就有</span>') +
+      '</div>';
+  }
+  return list.map(function (d) { return hdItemHtml(d, d.no === sel); }).join('');
+}
+
+function pickLocalDevice() {
+  var r = api('histDevs', {});
+  var ds = (r && r.devs) || [];
+  if (!ds.length) {
+    openBox('选择设备',
+      '<div class="empty">本地还没有落盘记录<br><span class="tiny">' +
+      '启动「监控」跑一次巡检后，这里会自动列出有数据的设备</span></div>',
+      null);
+    return;
+  }
+  openBox('选择设备（本地记录）',
+    '<input id="hdKw" placeholder="搜站名 / 编号 / 账号" autocomplete="off">' +
+    '<div class="tiny muted" id="hdCnt" style="margin:7px 0 9px"></div>' +
+    '<div id="hdL">' + hdListHtml(ds, '', G.histNo) + '</div>' +
+    '<div class="two" style="margin-top:12px"><button data-no>关闭</button>' +
+    '<button class="pri" data-ok>好</button></div>',
+    null);
+
+  var kw = '';
+  function paint() {
+    el('hdL').innerHTML = hdListHtml(ds, kw, G.histNo);
+    el('hdCnt').textContent = kw
+      ? ('匹配 ' + el('hdL').querySelectorAll('[data-hd]').length + ' / ' + ds.length + ' 台')
+      : ('共 ' + ds.length + ' 台，按最后记录时间排序');
+    el('hdL').querySelectorAll('[data-hd]').forEach(function (n) {
+      n.onclick = function () {
+        /* 点中即查 —— 不再多一个「查询」确认键 */
+        G.histAcc = n.getAttribute('data-ha');
+        G.histNo = n.getAttribute('data-hd');
+        G.histName = n.getAttribute('data-hn') || '';
+        hAcc = G.histAcc;
+        hDevLabel = G.histName || G.histNo;
+        hOn = {};
+        closeBox();
+        V_hist();
+        doQuery();
+      };
+    });
+  }
+  el('hdKw').oninput = function () { kw = this.value.trim(); paint(); };
+  paint();
+}
+
+function pickDevice() {
+  if (!hAcc) { toast('「全部账号」不需要选设备，直接查询'); return; }
+  var ds = G.devCache[hAcc] || [];
+  if (!ds.length) { toast('先点「读取设备」'); return; }
+  openBox('选择设备',
+    '<input id="pdKw" placeholder="搜索设备名或编号" autocomplete="off">' +
+    '<div class="tiny muted" id="pdCnt" style="margin:7px 0 9px"></div>' +
+    '<div id="pdList">' + pdListHtml(ds, '', G.histNo) + '</div>' +
+    '<div class="two" style="margin-top:12px"><button data-no>取消</button>' +
+    '<button class="pri" data-ok>查询</button></div>',
+    function () {
+      if (!G.histNo) { toast('没选设备'); return false; }
+      closeBox();
+      doQuery();
+    });
+
+  var kw = '';
+  function paint() {
+    el('pdList').innerHTML = pdListHtml(ds, kw, G.histNo);
+    el('pdCnt').textContent = kw
+      ? ('匹配 ' + el('pdList').querySelectorAll('[data-pd]').length + ' / ' + ds.length + ' 台')
+      : ('共 ' + ds.length + ' 台');
+    el('pdList').querySelectorAll('[data-pd]').forEach(function (n) {
+      n.onclick = function () {
+        G.histNo = n.getAttribute('data-pd');
+        G.histName = n.querySelector('.t').textContent;
+        el('pdList').querySelectorAll('.item').forEach(function (x) { x.className = 'item'; });
+        n.className = 'item on';
+      };
+    });
+  }
+
+  /* oninput 而不是 onchange：边打边筛，不用等失焦 */
+  el('pdKw').oninput = function () {
+    kw = this.value.trim();
+    paint();
+  };
+  paint();
+}
+
+function doQuery() {
+  /* 全部账号：acc='' 、no=''，后端跨账号汇总 */
+  if (hAcc === null) { toast('先选账号'); return; }
+  if (hAcc !== '' && !G.histNo) { toast('先选设备'); return; }
+  var box = el('hRes');
+  if (box) box.innerHTML = '<div class="card"><div class="empty">查询中…</div></div>';
+  setTimeout(function () {
+    var r = api('histGet', {
+      acc: hAcc === '' ? '' : G.histAcc, no: hAcc === '' ? '' : G.histNo,
+      hours: hHours, src: hSrc
+    });
+    /* 查询期间用户可能已经切走，别覆盖当前页 */
+    if (G.tab !== 'hist') return;
+    G.hist = r;
+    hOn = {};
+    var box2 = el('hRes');
+    if (box2) box2.innerHTML = histResultHtml();
+    bindHist();
+    var keys = Object.keys((r && r.series) || {});
+    toast(r.ok && r.count ? ('查到 ' + r.count + ' 个变量') :
+      (r.error || '没有数据'));
+  }, 30);
+}
+
+function showFiles() {
+  var r = api('histFiles', {});
+  var fs = (r && r.files) || [];
+  /* 历史文件会随监控持续增长（每轮巡检落一个），所以同样给搜索框。
+     【v0.27】只读改成可勾选删除 —— 表格数据膨胀快（监控每轮落一次盘，
+     一个站点一个月能落几十 MB），没有清理入口目录只会越攒越大。
+     勾选删除而不是「保留最近 N 个月」：看着每个文件多大自己挑，
+     手动保存的历史数据_*.csv 可能是特意留的底账，不能替人做主。 */
+  function hfListHtml(kw) {
+    var list = fs;
+    if (kw) {
+      var q = kw.toLowerCase();
+      list = fs.filter(function (f) { return (f.name || '').toLowerCase().indexOf(q) >= 0; });
+    }
+    if (!list.length) {
+      return '<div class="empty">' + (kw ? '没有匹配「' + esc(kw) + '」的文件'
+        : '还没有历史文件<br><span class="tiny">启动监控后会自动落盘</span>') + '</div>';
+    }
+    return list.map(function (f) {
+      /* 勾选框放在行内，label 包住整行让点文字也能勾 */
+      return '<label class="item" style="display:flex;align-items:center;gap:9px">' +
+        '<input type="checkbox" class="hfck" data-fn="' + esc(f.name) + '" ' +
+        'style="width:19px;height:19px;flex:none">' +
+        '<span style="flex:1;min-width:0"><span class="t" style="display:block">' +
+        esc(f.name) + '</span>' +
+        '<span class="s">' + (f.auto ? '监控自动落盘' : '手动保存') + ' · ' +
+        (f.size / 1024).toFixed(1) + ' KB</span></span></label>';
+    }).join('');
+  }
+
+  openBox('历史数据文件',
+    (fs.length
+      ? '<input id="hfKw" placeholder="搜索文件名" autocomplete="off">' +
+        '<div class="tiny muted" id="hfCnt" style="margin:7px 0 9px"></div>' +
+        '<div id="hfL">' + hfListHtml('') + '</div>' +
+        '<div class="tiny muted" style="margin-top:8px">勾选要删除的文件，' +
+        '删了不可恢复；正在写入的本月文件删了下轮巡检会重新生成。</div>'
+      : '<div class="empty">还没有历史文件<br><span class="tiny">启动监控后会自动落盘</span></div>') +
+    (fs.length
+      ? '<div class="two" style="margin-top:12px"><button data-no>关闭</button>' +
+        '<button class="dan" id="hfDel" disabled>🗑 删除选中</button></div>'
+      : '<div class="two" style="margin-top:12px"><button data-no>关闭</button>' +
+        '<button class="pri" data-ok>好</button></div>'));
+
+  if (fs.length) {
+    var kw = '';
+    function paint() {
+      el('hfL').innerHTML = hfListHtml(kw);
+      var shown = el('hfL').querySelectorAll('.item').length;
+      el('hfCnt').textContent = kw
+        ? ('匹配 ' + shown + ' / ' + fs.length + ' 个')
+        : ('共 ' + fs.length + ' 个');
+      bindCk();
+      refreshDel();
+    }
+    /* 「删除选中」按钮：无勾选时置灰，有勾选时显示会释放多少空间 */
+    function picked() {
+      return [].slice.call(el('hfL').querySelectorAll('.hfck:checked'));
+    }
+    function refreshDel() {
+      var b = el('hfDel');
+      if (!b) return;
+      var n = picked().length;
+      b.disabled = !n;
+      b.textContent = n ? ('🗑 删除选中 (' + n + ')') : '🗑 删除选中';
+    }
+    function bindCk() {
+      el('hfL').querySelectorAll('.hfck').forEach(function (ck) {
+        ck.onchange = refreshDel;
+      });
+    }
+    el('hfDel').onclick = function () {
+      var cks = picked();
+      if (!cks.length) return;
+      var names = cks.map(function (ck) { return ck.getAttribute('data-fn'); });
+      var bytes = 0;
+      names.forEach(function (n) {
+        fs.forEach(function (f) { if (f.name === n) bytes += (f.size || 0); });
+      });
+      confirmBox('删除 ' + names.length + ' 个历史文件',
+        '共 ' + (bytes / 1024).toFixed(1) + ' KB，删除后不可恢复。\n\n' +
+        '里面是监控自动落盘的曲线数据，删掉后这段时间的曲线就查不到了。',
+        function () {
+          var rr = api('histClean', { names: names });
+          if (!rr.ok) { toast(rr.error || '删除失败'); return; }
+          toast('已删 ' + rr.deleted + ' 个文件，释放 ' +
+            (rr.freed / 1024).toFixed(1) + ' KB');
+          closeBox();
+        });
+    };
+    el('hfKw').oninput = function () { kw = this.value.trim(); paint(); };
+    paint();
+  }
+}
+
+/* ---------- 折线图 ---------- */
+function drawChart() {
+  var cv = el('hCv');
+  if (!cv || !G.hist) return;
+  var series = G.hist.series || {};
+  var keys = Object.keys(series).filter(function (k) { return hOn[k]; });
+  if (!keys.length) keys = Object.keys(series).slice(0, 3);
+  if (keys.length > 6) keys = keys.slice(0, 6);
+
+  var W = cv.width, H = cv.height;
+  var g = cv.getContext('2d');
+  g.clearRect(0, 0, W, H);
+
+  var padL = 52, padR = 14, padT = 14, padB = 30;
+  var iw = W - padL - padR, ih = H - padT - padB;
+
+  /* 值域 */
+  var tMin = Infinity, tMax = -Infinity, vMin = Infinity, vMax = -Infinity;
+  keys.forEach(function (k) {
+    (series[k] || []).forEach(function (p) {
+      var t = p[0], v = p[1];
+      if (t < tMin) tMin = t;
+      if (t > tMax) tMax = t;
+      if (v < vMin) vMin = v;
+      if (v > vMax) vMax = v;
+    });
+  });
+  if (!isFinite(tMin)) return;
+  if (tMax === tMin) tMax = tMin + 1;
+  if (vMax === vMin) { vMax = vMin + 1; }
+
+  var pad = (vMax - vMin) * 0.1;
+  vMin -= pad; vMax += pad;
+
+  function X(t) { return padL + (t - tMin) / (tMax - tMin) * iw; }
+  function Y(v) { return padT + ih - (v - vMin) / (vMax - vMin) * ih; }
+
+  /* 横向网格 + Y 轴 */
+  g.strokeStyle = '#eceff4';
+  g.fillStyle = '#8b93a1';
+  g.font = '11px sans-serif';
+  g.textAlign = 'right';
+  g.lineWidth = 1;
+  for (var i = 0; i <= 4; i++) {
+    var v = vMin + (vMax - vMin) * i / 4;
+    var y = Y(v);
+    g.beginPath();
+    g.moveTo(padL, y);
+    g.lineTo(W - padR, y);
+    g.stroke();
+    g.fillText(fmtV(v), padL - 6, y + 4);
+  }
+
+  /* X 轴时间刻度 */
+  g.textAlign = 'center';
+  g.textBaseline = 'top';
+  for (var j = 0; j <= 3; j++) {
+    var t = tMin + (tMax - tMin) * j / 3;
+    var x = X(t);
+    g.strokeStyle = '#f2f4f8';
+    g.beginPath();
+    g.moveTo(x, padT);
+    g.lineTo(x, padT + ih);
+    g.stroke();
+    g.fillStyle = '#8b93a1';
+    g.fillText(fmtT(t), x, padT + ih + 7);
+  }
+
+  /* 曲线 */
+  keys.forEach(function (k) {
+    var pts = series[k] || [];
+    if (!pts.length) return;
+    var c = PAL[Object.keys(series).indexOf(k) % PAL.length];
+    g.strokeStyle = c;
+    g.lineWidth = 2;
+    g.lineJoin = 'round';
+    g.beginPath();
+    pts.forEach(function (p, i) {
+      var x = X(p[0]), y = Y(p[1]);
+      if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+    });
+    g.stroke();
+    /* 末点 */
+    var last = pts[pts.length - 1];
+    g.fillStyle = c;
+    g.beginPath();
+    g.arc(X(last[0]), Y(last[1]), 3, 0, 6.284);
+    g.fill();
+  });
+
+  /* 图例 */
+  var lg = el('hLg');
+  if (lg) {
+    lg.innerHTML = keys.map(function (k) {
+      var idx = Object.keys(series).indexOf(k) % PAL.length;
+      var nm = '';
+      (G.hist.vars || []).forEach(function (v) {
+        if (v.name === k) nm = v.unit || '';
+      });
+      var last = '';
+      var pts = series[k] || [];
+      if (pts.length) last = fmtV(pts[pts.length - 1][1]);
+      return '<i><b style="background:' + PAL[idx] + '"></b>' + esc(k) +
+        (nm ? '(' + esc(nm) + ')' : '') + ' ' + last + '</i>';
+    }).join('');
+  }
+
+  var ax = el('hAx');
+  if (ax) ax.textContent = fmtT(tMin) + '　至　' + fmtT(tMax) + '　共 ' +
+    keys.length + ' 条曲线';
+}
+
+function fmtV(v) {
+  if (Math.abs(v) >= 1000) return v.toFixed(0);
+  if (Math.abs(v) >= 100) return v.toFixed(1);
+  if (Math.abs(v) >= 10) return v.toFixed(2);
+  return v.toFixed(3);
+}
+
+function fmtT(ms) {
+  var d = new Date(ms);
+  function p(n) { return n < 10 ? '0' + n : '' + n; }
+  return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}

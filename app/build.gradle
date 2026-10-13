@@ -1,0 +1,60 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'org.usrcloud.xunjian'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "org.usrcloud.xunjian"
+        minSdk 21
+        targetSdk 33
+        versionCode 10000
+        versionName "1.0.0"
+    }
+
+    signingConfigs {
+        release {
+            // 签名密钥不进仓库（见 .gitignore）。没有密钥时用 debug 签名兜底，
+            // 保证 clone 下来就能 assembleRelease，只是装不到别人已装的旧包上。
+            def ks = file("../keystore/usrcloud.jks")
+            if (ks.exists()) {
+                storeFile ks
+                storePassword System.getenv("USRCLOUD_STORE_PWD") ?: "usrcloud2026"
+                keyAlias "usrcloud"
+                keyPassword System.getenv("USRCLOUD_KEY_PWD") ?: "usrcloud2026"
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            // 没有自己的密钥时用 debug 签名兜底，避免打出装不上的未签名包
+            signingConfig file("../keystore/usrcloud.jks").exists()
+                    ? signingConfigs.release : signingConfigs.debug
+        }
+        debug {
+            signingConfig file("../keystore/usrcloud.jks").exists()
+                    ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+        /* 源码里有中文注释，不声明 UTF-8 的话 javac 会按平台默认编码读，
+           Windows 中文版是 GBK，中文注释里的全角标点全被当成非法字符 ——
+           v0.22 首次构建就因此报 30 个「非法字符」。 */
+        encoding = 'UTF-8'
+    }
+
+    packagingOptions {
+        resources.excludes += ['META-INF/*']
+    }
+}
+
+dependencies {
+    // 只需 core（FileProvider）；不用 appcompat —— 本 App 用原生 Activity + WebView，
+    // 引 appcompat 会带进 kotlin-stdlib-jdk7/jdk8 并与 stdlib 重复声明同一批类。
+    implementation 'androidx.core:core:1.12.0'
+}

@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>有人云巡站</title>
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;padding:0;height:100%}
+body{font-family:-apple-system,"PingFang SC","Noto Sans SC","Microsoft YaHei",sans-serif;
+  background:#f2f4f7;color:#1a1d22;font-size:15px;line-height:1.5;
+  display:flex;flex-direction:column;overflow:hidden}
+#hd{background:#fff;padding:calc(env(safe-area-inset-top) + 14px) 18px 12px;
+  border-bottom:1px solid #e6e9ef;flex:0 0 auto}
+#hd h1{margin:0;font-size:20px;font-weight:600;letter-spacing:.3px}
+#hd p{margin:3px 0 0;font-size:12.5px;color:#7b8494}
+#hd .ver{float:right;font-size:11px;color:#98a0ae;margin-top:4px}
+#main{flex:1 1 auto;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:14px 14px 20px}
+#main.hide{display:none}
+#nav{flex:0 0 auto;display:flex;background:#fff;border-top:1px solid #e6e9ef;
+  padding-bottom:env(safe-area-inset-bottom)}
+#nav .tab{flex:1;text-align:center;padding:7px 0 6px;cursor:pointer;color:#8b93a1}
+#nav .tab img{width:23px;height:23px;display:block;margin:0 auto 2px}
+#nav .tab span{font-size:11px;display:block}
+#nav .tab.on{color:#2b62e0}
+.card{background:#fff;border-radius:12px;padding:14px;margin-bottom:12px;
+  box-shadow:0 1px 3px rgba(20,30,50,.06)}
+.card h2{margin:0 0 10px;font-size:15px;font-weight:600;display:flex;align-items:center;gap:6px}
+.card h2 .r{margin-left:auto;font-size:12px;font-weight:400;color:#98a0ae}
+.muted{color:#7b8494;font-size:12.5px}
+.tiny{font-size:11.5px}
+.mono{font-family:ui-monospace,Menlo,Consolas,monospace}
+.row{display:flex;align-items:center;gap:10px}
+.row.wrap{flex-wrap:wrap}
+.sp{flex:1}
+.sep{height:1px;background:#eef0f4;margin:11px -14px}
+button{font-family:inherit;font-size:14px;border:0;border-radius:9px;padding:10px 14px;
+  cursor:pointer;background:#eef1f6;color:#39404d;font-weight:500}
+button:active{opacity:.72}
+button.pri{background:#2b62e0;color:#fff}
+button.ok{background:#12a19a;color:#fff}
+button.dan{background:#fdecec;color:#d33d3d}
+button.sm{padding:6px 11px;font-size:12.5px;border-radius:7px}
+button.blk{display:block;width:100%}
+button[disabled]{opacity:.45;pointer-events:none}
+input,select{font-family:inherit;font-size:14px;border:1px solid #dde1e8;border-radius:8px;
+  padding:9px 10px;background:#fff;color:#1a1d22;width:100%}
+input:focus,select:focus{outline:none;border-color:#2b62e0}
+label.fl{display:block;font-size:12.5px;color:#6b7382;margin:10px 0 5px}
+.pill{display:inline-block;padding:2px 8px;border-radius:11px;font-size:11.5px;font-weight:500}
+.pill.g{background:#e6f6ec;color:#1a7f37}
+.pill.y{background:#fff4e0;color:#a86a00}
+.pill.r{background:#fdecec;color:#c62f2f}
+.pill.b{background:#e8f0fe;color:#2b62e0}
+.pill.gray{background:#eef1f6;color:#6b7382}
+.bar{background:#e8f4ec;color:#1a7f37;border-radius:10px;padding:10px 12px;
+  font-size:12.5px;margin-bottom:12px;line-height:1.6;word-break:break-all}
+.bar.w{background:#fff4e0;color:#8a5a00}
+.big{background:#2b62e0;color:#fff;border-radius:12px;padding:15px;width:100%;
+  font-size:16px;font-weight:600;box-shadow:0 2px 8px rgba(43,98,224,.28)}
+.big.stop{background:#f0f2f6;color:#39404d;box-shadow:none}
+.big.pause{background:#d98a00}
+.two{display:flex;gap:10px}
+.two>*{flex:1}
+/* 三按钮行：截图预览的「上一张 / 关闭 / 下一张」 */
+.three{display:flex;gap:8px}
+.three>*{flex:1;min-width:0}
+/* 【v0.26】截图预览的「分享这张」按钮：三按钮行下面通栏一条，
+   和切换按钮分开 —— 分享是低频动作，混进切换行会把按钮挤得太窄。 */
+.sharebtn{width:100%;margin-top:8px}
+.item{border:1px solid #e8ebf0;border-radius:10px;padding:11px 12px;margin-bottom:9px;background:#fff}
+.item.on{border-color:#2b62e0;background:#f7faff}
+.item .t{font-size:14.5px;font-weight:600;margin-bottom:3px}
+.item .s{font-size:12px;color:#7b8494}
+.chk{width:19px;height:19px;flex:0 0 auto;border:2px solid #c8ced8;border-radius:5px;
+  display:flex;align-items:center;justify-content:center;font-size:12px;color:#fff}
+/* 勾号默认透明，只有 .on 时才显示。
+   原来直接写死字面「✓」在 div 里，未勾选的行也是实心对勾 ——
+   v0.22 导出列表 46 行全是蓝勾、计数却是 0，就是这么来的。 */
+.chk .tick{opacity:0;transform:scale(.6);transition:.12s}
+.chk.on .tick{opacity:1;transform:scale(1)}
+.chk.on{background:#2b62e0;border-color:#2b62e0}
+/* 选中态整行给个边框，光靠小方块不够醒目 */
+.pick.seld{border-color:#2b62e0;background:#f4f8ff}
+#logbox{background:#1e2229;border-radius:10px;padding:11px;font-size:11.5px;
+  line-height:1.65;color:#c8cfda;max-height:100%;overflow-y:auto;
+  font-family:ui-monospace,Menlo,Consolas,monospace;word-break:break-all;white-space:pre-wrap}
+#logbox .e{color:#ff8a80}#logbox .w{color:#ffcc80}#logbox .g{color:#8fdb90}#logbox .i{color:#82b1ff}
+/* 【v0.18】日志每条必须独占一行。
+   logCls() 原来返回的是紧挨着的 <span>，而 span 是 inline 元素，
+   二十多条日志会连成一整块浆糊。加 display:block 让每条 span 成块，
+   双保险 —— 父容器已有 white-space:pre-wrap 负责 \n，
+   这里保证即使某行 \n 丢失也不会粘在一起。 */
+#logbox span{display:block}
+/* 【v0.18】提醒覆盖情况提示卡。橙色左边框 + 浅底，
+   一眼能看出这是「需要你处理」而不是普通信息。 */
+.warncard{border-left:3px solid #d98a00;background:#fffaf2}
+.unclist{background:#fff;border:1px solid #f0e2c8;border-radius:8px;padding:9px 11px;
+  font-size:12.5px;line-height:1.75;color:#5c6472;word-break:break-all}
+/* 【v0.19】账号表格原文编辑用的等宽文本域 */
+#rawBox{width:100%;border:1px solid #e3e7ee;border-radius:8px;padding:9px 10px;
+  background:#fafbfc;color:#2b3240;resize:vertical;outline:none;
+  word-break:break-all;white-space:pre}
+#rawBox:focus{border-color:#2f6bff;background:#fff}
+.stat{display:flex;background:#fff;border-radius:12px;padding:12px 4px;margin-bottom:12px;
+  box-shadow:0 1px 3px rgba(20,30,50,.06)}
+.stat>div{flex:1;text-align:center;position:relative}
+.stat>div+div:before{content:"";position:absolute;left:0;top:4px;bottom:4px;width:1px;background:#eef0f4}
+.stat b{display:block;font-size:19px;font-weight:600;line-height:1.25}
+.stat span{font-size:11px;color:#8b93a1}
+/* 统计格可点：点数字即筛选下方设备列表。
+   数量为 0 的格子置灰，避免点了没反应还以为是坏了。 */
+.stat>div[data-st]{cursor:pointer;padding:4px 0;border-radius:9px;transition:background .12s}
+.stat>div[data-st]:active{background:#f2f5fb}
+.stat>div[data-st].zero{opacity:.4}
+.stat>div[data-st].on{background:#eef3fe;box-shadow:inset 0 0 0 1.5px #2b62e0}
+.stat>div[data-st].on span{color:#2b62e0;font-weight:600}
+.seg{display:flex;background:#eef1f6;border-radius:9px;padding:3px;gap:3px;overflow-x:auto}
+.seg .s{flex:1;text-align:center;padding:7px 9px;border-radius:7px;font-size:12.5px;
+  color:#5c6472;cursor:pointer;white-space:nowrap}
+.seg .s.on{background:#fff;color:#2b62e0;font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.08)}
+.cv{width:100%;display:block;background:#fafbfd;border-radius:9px}
+.lg{display:flex;flex-wrap:wrap;gap:9px;margin-top:9px}
+.lg i{display:flex;align-items:center;gap:5px;font-size:11.5px;font-style:normal;color:#5c6472}
+.lg i b{width:11px;height:3px;border-radius:2px;display:block}
+.vchip{padding:5px 11px;border-radius:15px;font-size:12px;background:#eef1f6;color:#5c6472;cursor:pointer}
+.vchip.on{background:#2b62e0;color:#fff}
+table.tb{width:100%;border-collapse:collapse;font-size:12.5px}
+table.tb th{text-align:left;color:#7b8494;font-weight:500;padding:6px 4px;font-size:11.5px}
+table.tb td{padding:6px 4px;border-top:1px solid #f1f3f7}
+#mask{position:fixed;inset:0;background:rgba(15,20,30,.5);display:none;
+  align-items:center;justify-content:center;padding:20px;z-index:99}
+#mask.on{display:flex}
+/* 弹窗：flex 列布局，只有中间内容区滚动。
+   标题和底部按钮固定，列表再长也始终看得见「取消 / 查询」。 */
+#mbox{background:#fff;border-radius:14px;padding:18px;width:100%;max-width:420px;
+  max-height:86vh;display:flex;flex-direction:column;overflow:hidden}
+#mbox h3{margin:0 0 14px;font-size:16.5px;flex:0 0 auto}
+#mbox .mboxbody{flex:1 1 auto;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch}
+#mbox .mboxfoot{flex:0 0 auto;padding-top:12px;margin-top:12px;
+  border-top:1px solid #f1f3f7}
+#toast{position:fixed;left:50%;bottom:88px;transform:translateX(-50%);background:rgba(28,32,40,.94);
+  color:#fff;padding:9px 17px;border-radius:19px;font-size:13px;z-index:120;
+  max-width:80%;text-align:center;opacity:0;pointer-events:none;transition:opacity .22s}
+#toast.on{opacity:1}
+.empty{text-align:center;color:#a8b0bd;font-size:13px;padding:34px 10px}
+.fab{position:absolute;right:16px;top:12px;background:#2b62e0;color:#fff;
+  padding:7px 13px;border-radius:17px;font-size:12.5px;cursor:pointer;z-index:5}
+.dv{border-bottom:1px solid #f1f3f7;padding:10px 0}
+.dv:last-child{border-bottom:0}
+.dv .h{display:flex;align-items:center;gap:8px;margin-bottom:5px}
+.dv .nm{font-size:14px;font-weight:600;flex:1;word-break:break-all}
+.dv .vars{display:none;padding:6px 0 2px}
+.dv.open .vars{display:block}
+.dv table{width:100%;font-size:12px}
+.dv table td{padding:3px 4px;color:#5c6472}
+/* 设备行是点开的：加可点的暗示 + 展开箭头 */
+.dv .h{cursor:pointer}
+.dv .h:active{opacity:.6}
+.dv .ar{color:#b9c2d0;font-size:13px;flex:0 0 auto;margin-left:2px}
+/* 巡站结果行：截到图的整行可点，点开看截图。
+   用行而不是 table，因为行要整行可点，td 不好做，而且设备名长会被挤变形。 */
+.rl{margin-top:2px}
+.rl .ri{display:flex;align-items:center;gap:8px;padding:9px 2px;border-bottom:1px solid #f1f3f7}
+.rl .ri:last-child{border-bottom:0}
+.rl .ri .t{flex:1;min-width:0;font-size:13.5px;word-break:break-all}
+.rl .ri.has{cursor:pointer}
+.rl .ri.has:active{background:#f4f6fa}
+.rl .ri.has .ar{color:#b9c2d0;font-size:15px;flex:0 0 auto}
+.shotwrap{background:#fafbfd;border-radius:9px;overflow:auto;
+  max-height:62vh;text-align:center;padding:6px;
+  /* 【v0.25】左右滑切换截图。
+     pan-y = 纵向滚动照常交给浏览器，横向手势留给我们自己识别。
+     不写的话横向滑动会被 WebView 当成滚动/图片拖拽吃掉。 */
+  touch-action:pan-y}
+/* 图片本身禁止长按拖拽/选中：
+   否则在 Android WebView 里长按会触发系统「保存图片/复制」菜单，
+   横向拖动也会变成拖图片，手势切换直接失效。 */
+.shot{max-width:100%;height:auto;display:block;margin:0 auto;
+  -webkit-user-drag:none;-webkit-user-select:none;user-select:none;
+  transition:opacity .12s}
+.shot.loading{opacity:.25}
+/* 选择行：替代原生 <select>。
+   原生控件在 WebView 里是系统样式（灰底+方角），跟卡片风格割裂，
+   而且用户看到的还是系统那份选单，完全不是这个 app 的样子。 */
+.pick{display:flex;align-items:center;gap:10px;width:100%;
+  border:1px solid #e8ebf0;border-radius:10px;padding:11px 12px;background:#fff;
+  cursor:pointer;text-align:left;font-size:14.5px;color:#1a1a1a}
+.pick .pf{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pick .pf.ph{color:#a8b0bd}
+.pick .ar{color:#b9c2d0;font-size:15px;flex:0 0 auto}
+.pick:active{border-color:#2b62e0;background:#f7faff}
+/* 【v0.22】批量导出选择行：off = 已导出过，标灰但仍可再勾（用户有时确实要重发） */
+.pick.off{background:#f6f7f9;border-color:#eef0f4;color:#9aa2ae}
+.pick.off .t{color:#9aa2ae}
+.pick.off .chk{border-color:#dfe3e9;background:#eef0f4}
+.pick.off .chk.on{background:#9aa2ae;border-color:#9aa2ae}
+.pick .grow{flex:1;min-width:0}
+.pill.gray{background:#eceff4;color:#7c8797}
+.al{border-left:3px solid #d97a29;background:#fffaf2;padding:9px 11px;border-radius:0 8px 8px 0;
+  margin-bottom:8px}
+.al.c{border-color:#d33d3d;background:#fdf5f5}
+.al .m{font-size:13px;font-weight:600;margin:3px 0}
+.al .t{font-size:11px;color:#8b93a1}
+/* 【v0.22】提醒条目可点：点开看该站点实时数据 */
+.al.clickable{cursor:pointer}
+.al.clickable:active{background:#fff4e4}
+.al .almore{margin-top:5px;font-size:11px;color:#2b62e0}
+/* 【v0.22】模块折叠。
+   异常提醒一多就把设备列表挤出屏幕，「这些异常不会提醒」更是纯提示，
+   两者都不该长期占着大块地方。默认折叠，标题栏右侧 ⌃/⌄ 指示点击后行为。 */
+.foldh{cursor:pointer;user-select:none;-webkit-user-select:none;margin-bottom:0!important}
+.foldh .ar{font-size:15px;color:#98a0ae;line-height:1}
+.foldbody{display:none;padding-top:11px}
+.foldbody.open{display:block}
+.rw .nm2{font-size:14px;font-weight:600;margin-bottom:4px}
+.rw .kw{font-size:12px;color:#7b8494;margin-bottom:8px}
+.hl{color:#d97a29;font-weight:600}
+</style>
+</head>
+<body>
+<div id="hd">
+  <span class="ver" id="hver">v1.0.0</span>
+  <h1 id="htitle">有人云巡站</h1>
+  <p id="hsub">铁路站点水电巡检 · 一键截图</p>
+</div>
+<div id="main"></div>
+<div id="nav"></div>
+<div id="mask"><div id="mbox"></div></div>
+<div id="toast"></div>
+<script src="_core.js"></script>
+<script src="_patrol.js"></script>
+<script src="_watch.js"></script>
+<script src="_log.js"></script>
+<script src="_hist.js"></script>
+<script src="_me.js"></script>
+<script src="_boot.js"></script>
+</body>
+</html>

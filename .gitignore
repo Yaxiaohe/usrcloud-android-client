@@ -1,0 +1,20 @@
+# Gradle / 构建产物
+.gradle/
+build/
+app/build/
+*.apk
+*.aab
+output-metadata.json
+
+# 本地环境
+local.properties
+.idea/
+*.iml
+
+# 签名密钥（绝不入库）
+keystore/
+*.jks
+*.keystore
+
+# 系统
+.DS_Store
