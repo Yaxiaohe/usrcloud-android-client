@@ -44,7 +44,7 @@ public class Core {
        改一处两边同时生效。 */
     public static volatile int STALE_MINUTES = 15;
     public static final int MAX_CARDS = 10;
-    public static final String APP_VERSION = "0.31";
+    public static final String APP_VERSION = "0.32";
 
     /** 并发线程数，可在「我的 → 设置」里改，落盘到 设置.json */
     public static volatile int WORKERS = 4;
@@ -352,9 +352,10 @@ public class Core {
      * 强制把 assets 里的预置账号表覆盖到手机。【v0.20 新增】
      *
      * 【为什么必须有这个】seedAccountsIfAbsent 只在文件不存在时复制，
-     * 而覆盖安装不会删掉应用私有目录 —— 升级上来时手机里那份旧的
-     * accounts.csv 原封不动还在，用户在界面上看到的始终是手机里的旧文件，
-     * 不是新包里那份。所以需要给用户一个主动入口：清掉当前表，重新铺预置表。
+     * 而覆盖安装不会删掉应用私有目录 —— 用户从旧版本升上来时，
+     * 手机里那份旧的 accounts.csv 原封不动还在。
+     * 于是会出现「我在新包里删掉的账号，怎么还在列表里」——
+     * 用户看的是手机里的旧文件，不是新包里那份。
      *
      * 所以必须给一个用户主动可调的入口：清掉当前表，重新铺预置表。
      * 返回铺进去的账号列表。
@@ -401,6 +402,7 @@ public class Core {
         }
     }
 
+    /** 当前私有目录里那份账号表是不是已经比预置的旧（用于界面提示）。 */
     /** 当前私有目录里那份账号表是不是已经比预置的旧（用于界面提示）。
      *  本包不带任何预置账号（assets/accounts.csv 只有表头），
      *  所有账号都由用户自己添加，不存在「预置表里已删除、手机上还留着」的情况，

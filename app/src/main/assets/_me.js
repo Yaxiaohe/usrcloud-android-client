@@ -266,8 +266,10 @@ function bindMe() {
   var mr = el('mRaw');
   if (mr) mr.onclick = function () { editRawTable(); };
 
-  /* 恢复出厂预置账号：覆盖安装不会动应用私有目录，
-     手机里那份旧 accounts.csv 会一直留着，用户在界面上看到的始终是旧文件。
+  /* 【v0.20 新增】恢复出厂预置账号。
+     用户反馈「某线路还在程序包里没删掉」—— 查下来是覆盖安装不动私有目录，
+     手机里还留着 v0.18 那份 4 账号表（线路丙也在里面）。
+     APK 里其实已经只剩 3 个，用户看的是手机里的旧文件。
      既然改不掉，就给一个能主动重铺的入口。 */
   var mReset = el('mReset');
   if (mReset) {
@@ -684,7 +686,7 @@ function editRule(idx) {
        用户填「*回水温度」以为能匹配「回水温度T2」，
        实际上旧实现要求「必须以回水温度结尾」，永远不匹配，
        规则看着对却一条提醒都不来。 */
-    '<label class="fl">设备名（填 * = 全部；写「集通」= 名字里含集通）</label>' +
+    '<label class="fl">设备名（填 * = 全部；写「某线路」= 名字里含某线路）</label>' +
     '<input id="rDev" value="' + esc(r.dev || '*') + '">' +
     '<div id="rStaleBox"' + (r.kind === 'stale' ? '' : ' style="display:none"') + '>' +
     '<label class="fl">停更超过（分钟）</label>' +

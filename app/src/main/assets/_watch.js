@@ -197,16 +197,17 @@ function devListBody() {
       stPill(d.status) + '<span class="tiny muted">' + esc(d.age_text || '') + '</span>' +
       '<span class="ar">⌄</span></div>' +
       '<div class="tiny muted">' + esc(d.acc) + '</div>' +
-      '<div class="vars">' + rowsTable(d.rows, d) +
-      /* 【v0.30】展开后给一个「刷新这台」按钮：只拉这一台的实时数据，
-         不用等整轮巡检（一轮几十台，等不起）。按钮带 data-dvrf 由事件委托处理，
-         避免每轮重建 innerHTML 后 onclick 丢绑。 */
-      '<div class="row" style="margin-top:8px">' +
-      '<button class="sm" data-dvrf="' + esc(d.no) + '" data-dvacc="' + esc(d.acc) + '">' +
-      '⟳ 刷新这台</button>' +
-      '<span class="sp"></span><span class="tiny muted" data-dvrfmsg="' + esc(d.no) + '">' +
+      '<div class="vars">' +
+      /* 【v0.32】「刷新这台」从展开区左下挪到右上：展开后第一眼就看到，
+         不用穿过整张变量表滚到底才找得到。数据时间留在按钮左边同排。
+         按钮带 data-dvrf 由事件委托处理，避免每轮重建 innerHTML 后 onclick 丢绑。 */
+      '<div class="row" style="margin:2px 0 6px">' +
+      '<span class="tiny muted" data-dvrfmsg="' + esc(d.no) + '">' +
       (d.data_time && d.data_time !== '--' ? '数据时间 ' + esc(String(d.data_time).replace('T', ' ').slice(5, 16)) : '') +
-      '</span></div>' +
+      '</span><span class="sp"></span>' +
+      '<button class="sm" data-dvrf="' + esc(d.no) + '" data-dvacc="' + esc(d.acc) + '">' +
+      '⟳ 刷新这台</button></div>' +
+      rowsTable(d.rows, d) +
       '</div></div>';
   }).join('') + '</div>';
 }
@@ -438,7 +439,13 @@ function rowsTable(rows, d) {
       } else if (any) {
         cell = '<td style="text-align:right" class="tiny muted">只读</td>';
       }
-      return '<tr><td>' + esc(x[0]) + '</td><td><b>' + esc(x[1]) + '</b></td><td class="tiny">' +
+      return '<tr><td>' + esc(x[0]) + '</td>' +
+        '<td><b>' + esc(x[1]) + '</b>' +
+        /* 【v0.32】单变量刷新：只拉这台设备、就地更新这一行的值和时间。
+           每行都有（与可写与否无关），带 data-vr 由事件委托处理。 */
+        '<button class="vr" data-vr="' + esc(x[0]) + '" data-vracc="' + acc +
+        '" data-vrno="' + no + '">⟳</button></td>' +
+        '<td class="tiny">' +
         esc(String(x[2] || '-').replace('T', ' ').slice(5, 16)) + '</td>' + cell + '</tr>';
     }).join('') + '</table>' +
     (any ? '<div class="tiny muted" style="margin-top:6px">' +
@@ -638,11 +645,25 @@ function bindStat() {
 function bindDevRows() {
   if (document._dvDelegated) return;
   document._dvDelegated = true;
+  /* 【v0.32】长按站名复制的监听也是 document 级、绑一次，跟着一起装 */
+  bindNameLongPress();
   document.addEventListener('click', function (e) {
     var box = el('devList');
     if (!box) return;
     var t = e.target;
     if (!t || !t.closest) return;
+    /* 【v0.32】长按复制刚触发过的话，手指抬起会跟发一次 click ——
+       吞掉它，否则站名复制完、设备行还误展开。 */
+    if (document._lpFired) return;
+
+    /* 【v0.32】单变量刷新：必须排在展开逻辑前，按钮在 .dv 的变量表内，
+       不先截住点一下只会把设备行收起来。 */
+    var vr = t.closest('[data-vr]');
+    if (vr && box.contains(vr)) {
+      refreshOneVar(vr.getAttribute('data-vrno'), vr.getAttribute('data-vracc'),
+        vr.getAttribute('data-vr'), vr);
+      return;
+    }
 
     /* 【v0.30】先看是不是点了「刷新这台」。
        必须排在展开逻辑前面：刷新按钮在 .dv 区块内，如果不先截住，
@@ -675,6 +696,113 @@ function bindDevRows() {
     var ar = h.querySelector('.ar');
     if (ar) ar.textContent = on ? '⌃' : '⌄';
   });
+}
+
+/* ================= 【v0.32】长按站名复制 =================
+ *
+ * 站名又长又杂（「某线路站点E站1号200kW整机型式热泵机组_DRSCO2H200C90」），
+ * 用户要把它发给同事时手打必错，所以给站名加长按复制。
+ *
+ * 实现：touchstart 起 600ms 计时，touchend/move/cancel 都取消。
+ * 计时命中后：
+ *   ① 走原生剪贴板（WebView 里 navigator.clipboard 在 file:// 下不可用）；
+ *   ② 置 document._lpFired —— 手指抬起系统会补发一次 click，
+ *      click 委托开头看到这个标记直接 return，设备行不会被误展开；
+ *   ③ contextmenu 一律 preventDefault，不让 WebView 弹系统文本选择菜单。
+ * 站名本身 user-select:none（index.html），避免和系统选择行为打架。
+ */
+function bindNameLongPress() {
+  if (document._lpDelegated) return;
+  document._lpDelegated = true;
+  var timer = null;
+  function cancel() { if (timer) { clearTimeout(timer); timer = null; } }
+  document.addEventListener('touchstart', function (e) {
+    var t = e.target;
+    if (!t || !t.closest) return;
+    var box = el('devList');
+    if (!box) return;
+    var nm = t.closest('.dv .nm');
+    if (!nm || !box.contains(nm)) return;
+    cancel();
+    timer = setTimeout(function () {
+      timer = null;
+      copyDevName(nm);
+      document._lpFired = true;
+      setTimeout(function () { document._lpFired = false; }, 400);
+    }, 600);
+  }, { passive: true });
+  document.addEventListener('touchend', cancel);
+  document.addEventListener('touchmove', cancel);
+  document.addEventListener('touchcancel', cancel);
+  document.addEventListener('contextmenu', function (e) {
+    var box = el('devList');
+    if (box && e.target && e.target.closest && box.contains(e.target)) e.preventDefault();
+  });
+}
+
+function copyDevName(nm) {
+  var row = nm.closest('[data-dvno]');
+  var no = row ? row.getAttribute('data-dvno') : '';
+  /* 名字优先从 G.ws 里取（那才是完整原文）；快照里没有就退回界面文本 */
+  var name = '';
+  var dv = (G.ws && G.ws.devices) || [];
+  for (var i = 0; i < dv.length; i++) {
+    if (dv[i].no === no) { name = dv[i].name || ''; break; }
+  }
+  if (!name) name = nm.textContent || '';
+  if (!name) return;
+  var r = api('copyText', { text: name, label: '站名' });
+  if (r && r.ok) toast('已复制站名：' + name);
+  else toast((r && r.msg) || '复制失败');
+}
+
+/**
+ * 【v0.32】刷新单个变量：只拉这台设备的最新数据，就地更新这一行的值和数据时间。
+ *
+ * 为什么不复用 refreshOneDev 的整卡重绘：那个会把 #devList 整块 innerHTML 换掉，
+ * 用户正盯着一台设备的一串变量看，点一个 ⟳ 全卡重绘会闪一下、滚动位置也可能跳。
+ * 这里拉完只改：①这一行的值和时间 ②卡片顶部的「数据时间」 ③内存里的设备状态
+ * （不写回的话，下一次 softWatch 重绘又会把旧值画回来）。
+ */
+function refreshOneVar(no, acc, varName, btn) {
+  if (!no || !varName) return;
+  var old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  var r = api('watchDevRefresh', { no: no, acc: acc });
+  if (btn) { btn.disabled = false; btn.textContent = old || '⟳'; }
+  if (!r || !r.ok || !r.device) {
+    toast((r && (r.msg || r.error)) || '刷新失败，请稍后再试');
+    return;
+  }
+  var hit = null;
+  var rows = r.device.rows || [];
+  for (var i = 0; i < rows.length; i++) {
+    if (String(rows[i][0]) === varName) { hit = rows[i]; break; }
+  }
+  if (!hit) {
+    toast('这次的数据里没有「' + varName + '」');
+    return;
+  }
+  /* 写回内存：下次整页/软刷新重绘时不会跳回旧值 */
+  var dv = (G.ws && G.ws.devices) || [];
+  for (var j = 0; j < dv.length; j++) {
+    if (dv[j].no === r.device.no && (dv[j].acc || '') === (r.device.acc || '')) {
+      dv[j] = r.device; break;
+    }
+  }
+  /* 就地更新 DOM：值 + 时间。textContent 赋值自带转义，不用 esc。 */
+  var tr = btn ? btn.closest('tr') : null;
+  if (tr) {
+    var vb = tr.querySelector('td:nth-child(2) b');
+    if (vb) vb.textContent = hit[1];
+    var tm = tr.querySelector('td:nth-child(3)');
+    if (tm) tm.textContent = String(hit[2] || '-').replace('T', ' ').slice(5, 16);
+  }
+  var msg = document.querySelector('[data-dvrfmsg="' + cssEsc(no) + '"]');
+  if (msg && r.device.data_time && r.device.data_time !== '--') {
+    msg.textContent = '数据时间 ' + String(r.device.data_time).replace('T', ' ').slice(5, 16);
+  }
+  toast('已刷新「' + varName + '」');
 }
 
 /**

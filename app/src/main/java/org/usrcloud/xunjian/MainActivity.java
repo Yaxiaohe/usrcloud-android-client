@@ -865,6 +865,19 @@ public class MainActivity extends Activity {
                 o.put("device", Watch.refreshDevice(a.optString("acc"), a.optString("no")));
                 return o;
             }
+            /* 【v0.32】复制文本到系统剪贴板（监控页长按站名）。
+               WebView 里 navigator.clipboard 在 file:// 下基本是残废，
+               复制必须走原生。空内容如实拒绝，别让用户以为复制上了。 */
+            case "copyText": {
+                String text = a.optString("text", "");
+                if (text.isEmpty()) return fail("没有可复制的内容");
+                android.content.ClipboardManager cm =
+                        (android.content.ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                if (cm == null) return fail("剪贴板不可用");
+                cm.setPrimaryClip(ClipData.newPlainText(
+                        a.optString("label", "文本"), text));
+                return okSimple();
+            }
             case "watchInterval": {
                 Watch.setInterval(a.optInt("sec", 900));
                 return okSimple();

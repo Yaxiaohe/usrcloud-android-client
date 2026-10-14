@@ -149,11 +149,19 @@ table.tb td{padding:6px 4px;border-top:1px solid #f1f3f7}
 .dv{border-bottom:1px solid #f1f3f7;padding:10px 0}
 .dv:last-child{border-bottom:0}
 .dv .h{display:flex;align-items:center;gap:8px;margin-bottom:5px}
-.dv .nm{font-size:14px;font-weight:600;flex:1;word-break:break-all}
+.dv .nm{font-size:14px;font-weight:600;flex:1;word-break:break-all;
+  /* 【v0.32】长按复制站名：禁掉系统文本选择，避免和复制手势打架 */
+  -webkit-user-select:none;user-select:none;
+  -webkit-touch-callout:none}
 .dv .vars{display:none;padding:6px 0 2px}
 .dv.open .vars{display:block}
 .dv table{width:100%;font-size:12px}
 .dv table td{padding:3px 4px;color:#5c6472}
+/* 【v0.32】单变量刷新小按钮：跟在当前值后面，不抢地方 */
+.vr{border:0;background:none;color:#3a7bd5;font-size:12.5px;line-height:1;
+  padding:2px 3px;margin-left:5px;vertical-align:middle;cursor:pointer}
+.vr:disabled{color:#b9c2d0}
+.vr:active{opacity:.5}
 /* 设备行是点开的：加可点的暗示 + 展开箭头 */
 .dv .h{cursor:pointer}
 .dv .h:active{opacity:.6}
@@ -220,7 +228,7 @@ table.tb td{padding:6px 4px;border-top:1px solid #f1f3f7}
 </head>
 <body>
 <div id="hd">
-  <span class="ver" id="hver">v1.0.0</span>
+  <span class="ver" id="hver">v0.32</span>
   <h1 id="htitle">有人云巡站</h1>
   <p id="hsub">铁路站点水电巡检 · 一键截图</p>
 </div>
