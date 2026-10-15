@@ -2,7 +2,7 @@
 
 [有人云](https://www.usr.cn) 平台的第三方 Android 客户端：批量巡检设备、
 自动截图归档、离线/数据陈旧告警、历史数据折线图。纯原生 Java + WebView，
-没有内置 Python，APK 约 1.5 MB。
+APK 约 1.5 MB。
 
 当前版本 **v0.32**（与 `versionName` / 界面「关于」页显示一致）。
 
