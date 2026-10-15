@@ -532,8 +532,16 @@ function bindWatch() {
     n.onclick = function () {
       var v = parseInt(n.getAttribute('data-iv'), 10);
       var r = api('watchInterval', { sec: v });
-      if (r.ok) { toast('间隔已设为 ' + fmtIv(v)); renderWatch(); }
-      else toast(r.msg || '设置失败');
+      if (!r.ok) { toast(r.msg || '设置失败'); return; }
+      toast('间隔已设为 ' + fmtIv(v));
+      /* 【v0.32 修订】设完必须先拉一份最新状态再重绘。
+         原来这里是直接 renderWatch() —— 而 renderWatch 用的是 G.ws 里的旧快照，
+         里面的 summary.interval 还是上一个值，于是分段控件的高亮、下方
+         「启动后每 X 自动巡检一次」的文案全都停在旧档上，
+         要切到别的页再切回来（走整页拉取）才刷新 —— 用户报的就是这个：
+         「点切换没反应，切换页面才会刷新」。
+         pollWatch(true) = 重拉 watchState → 替换 G.ws → 整页重绘，一条链路。 */
+      pollWatch(true);
     };
   });
 
