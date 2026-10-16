@@ -251,6 +251,34 @@ public class Hist {
         return pack(series, values, order, hours, "local");
     }
 
+    /**
+     * 【v0.33】温度类变量排前面，其余保持原有相对顺序。
+     *
+     * <p>判定只认变量名里的「温度」两个字，以及用户可能写的同义词
+     * （Temp / ℃ / 度）—— 供暖场景里凡是带这些的，测的都是温度。
+     * 刻意不按单位判定：水流量、压力的单位在数据里才看得到，
+     * 而 pack 拿到的 order 只有名字；按名字判更稳、也不会误伤。
+     *
+     * <p>稳定分组：温度组内部不重排，用户熟悉的相邻关系保持不变。
+     */
+    static List<String> sortTempFirst(List<String> order) {
+        List<String> tmp = new ArrayList<>();
+        List<String> rest = new ArrayList<>();
+        for (String n : order) {
+            if (isTempVar(n)) tmp.add(n); else rest.add(n);
+        }
+        tmp.addAll(rest);
+        return tmp;
+    }
+
+    /** 变量名里是否含温度相关字样。 */
+    static boolean isTempVar(String name) {
+        if (name == null) return false;
+        String s = name.trim().toLowerCase(Locale.CHINA);
+        return s.contains("温度") || s.contains("temp") || s.contains("℃")
+                || s.contains("°c") || s.contains("度");
+    }
+
     private static JSONObject pack(Map<String, List<long[]>> series,
                                    Map<String, List<Double>> values,
                                    List<String> order, int hours, String source) {
@@ -259,9 +287,19 @@ public class Hist {
             o.put("ok", true);
             o.put("hours", hours);
             o.put("source", source);
+            /* 【v0.33】温度类变量排前面。
+             * 用户反馈「和温度相关的变量排序优先」——
+             * order 原本是变量在记录里**首次出现**的时间顺序，
+             * 于是一台 17 个变量的热泵机组，头几个位置被
+             * 水流量、定时运行使能、启动信号这类占满，
+             * 用户最关心的出/回水温度反而要往下翻，甚至落在
+             * 「图表只列前 N 个」的截断范围之外。
+             * 现在稳定分组：温度组在前，组内保持原有时间顺序，
+             * 温度组内部不乱（不然用户熟悉的相邻关系就变了）。 */
+            List<String> sorted = sortTempFirst(order);
             JSONArray vars = new JSONArray();
             JSONObject ser = new JSONObject();
-            for (String name : order) {
+            for (String name : sorted) {
                 List<long[]> ts = series.get(name);
                 List<Double> vs = values.get(name);
                 JSONArray pa = new JSONArray();

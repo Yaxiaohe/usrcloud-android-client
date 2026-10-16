@@ -100,13 +100,36 @@ public class Notifier {
      * @param level warn / critical / ok
      */
     public static void alert(Context ctx, String acc, String dev, String msg, String level) {
-        String title = (dev == null || dev.isEmpty()) ? "巡站提醒" : dev;
-        if (acc != null && !acc.isEmpty() && !acc.equals("-")) {
-            title = acc + " · " + title;
+        alert(ctx, acc, dev, msg, level, "");
+    }
+
+    /**
+     * 【v0.33】带规则名的提醒。
+     *
+     * <p>用户给规则起了名字（如「冬季供水温度过低」），
+     * 通知标题用这个名字而不是设备名 —— 一屏通知里都是长设备名时，
+     * 名字才是用户真正用来分辨「哪条规则报的」的信息。
+     * 名字为空时行为与原来完全一致，不影响老提醒。
+     */
+    public static void alert(Context ctx, String acc, String dev, String msg,
+                             String level, String ruleName) {
+        String name = (ruleName == null) ? "" : ruleName.trim();
+        if (name.isEmpty()) {
+            String t0 = (dev == null || dev.isEmpty()) ? "巡站提醒" : dev;
+            if (acc != null && !acc.isEmpty() && !acc.equals("-")) t0 = acc + " · " + t0;
+            notify(ctx, CH_ALERT, idOf(level), t0, msg, level, acc, dev);
+            return;
         }
+        /* 标题 = 规则名 + 设备名（下拉栏一行放不下两行，用 BigText 补全） */
+        String title = name;
+        if (dev != null && !dev.isEmpty() && !dev.equals(name)) {
+            title = name + " · " + dev;
+        }
+        String body = (acc != null && !acc.isEmpty() && !acc.equals("-"))
+                ? acc + "：" + msg : msg;
         /* 【v0.30】把 acc/dev 一起带下去：点通知要能直接跳到这台设备，
            只看监控页还不够 —— 页面上几十台设备，还是要用户自己找。 */
-        notify(ctx, CH_ALERT, idOf(level), title, msg, level, acc, dev);
+        notify(ctx, CH_ALERT, idOf(level), title, body, level, acc, dev);
     }
 
     /** 发一条一般状态通知（监控启动、扫描完成等）。 */

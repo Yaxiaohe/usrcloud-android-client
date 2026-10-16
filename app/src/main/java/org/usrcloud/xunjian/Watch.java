@@ -108,6 +108,65 @@ public class Watch {
         }
     }
 
+    /** 【v0.33 修订四】轮询间隔的落盘文件名（放私有目录，覆盖安装/重启都不丢）。 */
+    private static final String PREF_IVL = "watch_interval.txt";
+
+    /**
+     * 【v0.33 修订四】轮询间隔落盘。
+     *
+     * <p>用户报：「覆盖更新程序后监控页面的轮询间隔会回到 15 分钟，
+     * 而不是用户设置的那个」。真因是 {@code setInterval} 只改了内存里的
+     * {@code intervalSec}，**从头到尾没有写盘** ——
+     * 和 {@code enabled} 当年那个 bug 一模一样（v0.20 修的开关没落盘）。
+     * 覆盖安装不动应用私有目录，所以文件能留住；关键是得真写。
+     */
+    private static synchronized void persistInterval() {
+        try {
+            java.io.File f = new java.io.File(Core.rootDir(), PREF_IVL);
+            java.io.OutputStreamWriter w =
+                    new java.io.OutputStreamWriter(new java.io.FileOutputStream(f), "UTF-8");
+            w.write(String.valueOf(intervalSec));
+            w.flush();
+            w.close();
+        } catch (Exception e) {
+            Core.log("[监控] 轮询间隔保存失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 【v0.33 修订四】读回上次设置的轮询间隔。
+     *
+     * <p>和 {@link #restoreEnabled()} 一起在 app 启动时调。
+     * 读不到、格式不对、或超出合理范围（60~86400 秒）时，
+     * 一律保持默认值并把坏文件删掉 —— 宁可回到 15 分钟，
+     * 也不要拿一个乱数去调度监控。
+     */
+    public static synchronized void restoreInterval() {
+        try {
+            java.io.File f = new java.io.File(Core.rootDir(), PREF_IVL);
+            if (!f.exists()) return;
+            byte[] b = Core.readAllBytesOf(f);
+            String s = new String(b, java.nio.charset.Charset.forName("UTF-8")).trim();
+            int v;
+            try {
+                v = Integer.parseInt(s);
+            } catch (NumberFormatException ne) {
+                Core.log("[监控] 轮询间隔记录不是数字(" + s + ")，已删除并用默认值");
+                f.delete();
+                return;
+            }
+            if (v < 60 || v > 86400) {
+                Core.log("[监控] 轮询间隔记录越界(" + v + ")，已删除并用默认值");
+                f.delete();
+                return;
+            }
+            intervalSec = v;
+            Core.log("[监控] 已恢复上次的轮询间隔：" + (intervalSec / 60) + " 分钟");
+        } catch (Exception e) {
+            Core.log("[监控] 轮询间隔读取失败: " + e.getMessage());
+        }
+    }
+
     /** 设备当前状态：key = 账号名 + "|" + 设备号 */
     public static final Map<String, DevState> states = new LinkedHashMap<>();
     /** 异常提醒队列（新的在前） */
@@ -150,6 +209,10 @@ public class Watch {
         public String message;
         public String level = "warn";
         public boolean fresh = true;
+        /* 【v0.33】命中这条提醒的规则名（用户自己起的）。
+           老规则没有这个字段 → 为空 → 显示时退回自动生成的文案，
+           不能因为是空字符串就把通知标题弄成空的。 */
+        public String ruleName = "";
 
         JSONObject toJson() {
             JSONObject o = new JSONObject();
@@ -162,6 +225,7 @@ public class Watch {
                 o.put("msg", message);
                 o.put("level", level);
                 o.put("fresh", fresh);
+                o.put("rule_name", ruleName == null ? "" : ruleName);
             } catch (Exception ignored) {
             }
             return o;
@@ -317,7 +381,10 @@ public class Watch {
 
     public static void setInterval(int sec) {
         intervalSec = Math.max(60, sec);
-        Core.log("[监控] 间隔改为 " + (intervalSec / 60) + " 分钟");
+        /* 【v0.33 修订四】必须落盘。原来只改内存，进程一死/覆盖更新后就回到 15 分钟，
+           用户设的间隔等于白设（和 v0.20 那个「监控开关不落盘」是同一类 bug）。 */
+        persistInterval();
+        Core.log("[监控] 间隔改为 " + (intervalSec / 60) + " 分钟（已保存）");
         if (enabled) {
             setEnabled(false);
             setEnabled(true);
@@ -760,7 +827,8 @@ public class Watch {
                             if (!isNew && inCooldown(accName, d.name, varName, msg, cooldownMin)) {
                                 continue;
                             }
-                            pushAlert(accName, d.name, varName, msg, st.level());
+                            pushAlert(accName, d.name, varName, msg, st.level(),
+                                    r.optString("rule_name", ""));
                             newAlerts++;
                             break;   // 一台设备一次巡检只出一条，避免刷屏
                         }
@@ -873,9 +941,11 @@ public class Watch {
      *   acc=账号名 dev=设备名 var=变量名（均支持 *）
      *   kind: offline(离线) / stale(数据陈旧) / value(数值越限) / blank(采集异常)
      *   stale_min: 数据停更超过 N 分钟判离线（kind=stale/offline 时用）
+     *   rule_name: 用户给这条规则起的名字（v0.33 新增，可为空）
      *   op / val / val2: 数值比较（kind=value 时用），
-     *     op 取 lt/lte/gt/gte，v0.26 起新增 range（val < 数值 < val2，
-     *     两个都取开区间 —— 跟「大于8小于30」的口语语义一致）
+     *     op 取 lt/lte/gt/gte，v0.26 起新增 range（val &lt; 数值 &lt; val2，
+     *     两个都取开区间 —— 跟「大于8小于30」的口语语义一致），
+     *     v0.33 起新增 notinrange（不在区间内：数值 &lt;= val 或 &gt;= val2）
      */
     private static String matchRule(JSONObject r, Account cfg, Core.Dev d, DevState st) {
         if (!wmatch(r.optString("acc", "*"), cfg.name)) return null;
@@ -917,6 +987,12 @@ public class Watch {
             if ("range".equals(op) && lim > lim2) {
                 double t2 = lim; lim = lim2; lim2 = t2;
             }
+            /* 【v0.33】反向区间（notinrange）：不在区间内才提醒。
+               归一化必须和 range 一起做，否则用户填反了
+               「不在 30~8」会变成「不在 8~30」以外的怪东西。 */
+            if ("notinrange".equals(op) && lim > lim2) {
+                double t2 = lim; lim = lim2; lim2 = t2;
+            }
             for (String[] row : st.rows) {
                 if (row.length < 5) continue;
                 String vn = row[1] == null ? "" : row[1];
@@ -929,13 +1005,20 @@ public class Watch {
                     case "lte": hit = v <= lim; break;
                     case "gte": hit = v >= lim; break;
                     case "range": hit = v > lim && v < lim2; break;
+                    /* 【v0.33】不在区间内：开区间的反面。
+                       注意取的是「<=下限 或 >=上限」，
+                       正好是 range 的德摩根补集，两个边界都算不在区间内 ——
+                       用户写「不该在 8~30 之间」时，压着 8.0 的数就该报。 */
+                    case "notinrange": hit = (v <= lim || v >= lim2); break;
                     default: hit = v > lim; break;
                 }
                 if (hit) {
                     /* range 的提示把两个界限都写出来，别让人猜 */
                     String th = "range".equals(op)
                             ? String.format(Locale.CHINA, ">%s 且 <%s", trimNum(lim), trimNum(lim2))
-                            : op + trimNum(lim);
+                            : ("notinrange".equals(op)
+                               ? String.format(Locale.CHINA, "不在 %s ~ %s 内", trimNum(lim), trimNum(lim2))
+                               : op + trimNum(lim));
                     return String.format(Locale.CHINA, "%s = %s%s（阈值 %s）",
                             vn, trimNum(v), unitOf(row[4]), th);
                 }
@@ -1041,6 +1124,18 @@ public class Watch {
 
     static synchronized void pushAlert(String acc, String dev, String var,
                                                String msg, String level) {
+        pushAlert(acc, dev, var, msg, level, "");
+    }
+
+    /**
+     * 【v0.33】带规则名的 pushAlert。
+     *
+     * <p>为什么留一个不带名字的重载：站外还有几处主动造提醒
+     * （测试提醒、离线兜底、采集异常），它们本来就没有对应的用户规则，
+     * 硬塞一个空串调用方还得自己判断，不如保留旧签名。
+     */
+    static synchronized void pushAlert(String acc, String dev, String var,
+                                               String msg, String level, String ruleName) {
         Alert a = new Alert();
         a.id = ++alertSeq;
         a.time = System.currentTimeMillis();
@@ -1049,6 +1144,7 @@ public class Watch {
         a.varName = var;
         a.message = msg;
         a.level = level;
+        a.ruleName = (ruleName == null) ? "" : ruleName.trim();
         alerts.add(0, a);
         while (alerts.size() > 200) alerts.remove(alerts.size() - 1);
         Core.log("[告警] " + acc + " / " + dev + "：" + msg);
@@ -1057,7 +1153,7 @@ public class Watch {
            界面上「测试提醒」还弹 toast 说"请看下拉通知栏"，
            但全工程没有一处 NotificationManager 调用，通知栏永远是空的。 */
         try {
-            Notifier.alert(Core.appCtx(), acc, dev, msg, level);
+            Notifier.alert(Core.appCtx(), acc, dev, msg, level, a.ruleName);
         } catch (Throwable t) {
             Core.log("[告警] 通知发送异常：" + t);
         }

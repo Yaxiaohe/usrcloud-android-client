@@ -9,6 +9,11 @@ var hSrc = 'local';
    二是 7 天的曲线挤在一起看不出细节，真要查长期趋势再点一下就好。 */
 var hHours = 24;
 var hOn = {};        // 变量名 -> true（勾选显示）
+/* 【v0.33 修订三】hOn 是不是已经被「确定」过。
+   false = 还没人动过（刚查出来），此时全空会兜底默认前 3 条；
+   true  = 用户动过了，此时全空就是用户的意思 —— 一条都不显示。
+   没有这个标志就区分不了这两种「空」，用户把按钮全点掉会被兜底顶回来。 */
+var hInit = false;
 var hAcc = null;      // null=未选择；''=全部账号；否则账号名
 var hDevLabel = '';   // 【v0.28】已选设备的显示名（本地直选时用）
 
@@ -94,9 +99,19 @@ function histResultHtml() {
         : '换个时间范围再试') + '</span></div></div>';
   }
   var keys = Object.keys(r.series || {});
-  var on = keys.filter(function (k) { return hOn[k]; });
-  if (!on.length) on = keys.slice(0, 3);
-  if (on.length > 6) on = on.slice(0, 6);
+  /* 【v0.33】高亮与曲线共用一个口径（activeCurves），并显式传这次的 series：
+     此刻 G.hist 可能还是上一次查询的结果，直接用会算错对象。 */
+  var on = activeCurves(r.series);
+  /* 【v0.33 修订】把兜底结果**落进 hOn**。
+     否则「一个都没勾选」时 hOn 是空的，而界面亮着 3 条 ——
+     内部状态和屏幕上的事实对不上（正是这次 bug 的土壤）。
+     落进去之后：hOn 永远等于「实际显示哪些」，
+     点「关掉最后一条」也不会被兜底立刻顶回来。 */
+  hOn = {};
+  on.forEach(function (k) { hOn[k] = true; });
+  /* 渲染本身就是一次「确定」：此刻兜底选出的那几条就是当前显示的。
+     之后用户把它们全点掉，就该真的什么都不显示。 */
+  hInit = true;
 
   /* 全部账号汇总时变量会非常多，只列出前若干个，避免刷屏 */
   var shown = keys.slice(0, 60);
@@ -138,6 +153,7 @@ function bindHist() {
       hSrc = n.getAttribute('data-src');
       G.hist = null;
       hOn = {};
+    hInit = false;
       /* 切到平台云端时，「全部账号」不可用（云端必须按设备查），自动退回未选 */
       if (hSrc === 'cloud' && hAcc === '') hAcc = null;
       V_hist();
@@ -171,6 +187,7 @@ function bindHist() {
     G.histNo = null;
     G.hist = null;
     hOn = {};
+    hInit = false;
     V_hist();
     doQuery();
   };
@@ -203,6 +220,7 @@ function bindHist() {
         G.histNo = null;
         G.hist = null;
         hOn = {};
+    hInit = false;
         closeBox();
         V_hist();
         if (hAcc === '') doQuery();     // 全部账号 = 汇总，直接出结果
@@ -256,8 +274,42 @@ function bindHist() {
   m.querySelectorAll('[data-var]').forEach(function (n) {
     n.onclick = function () {
       var k = n.getAttribute('data-var');
-      hOn[k] = !hOn[k];
-      n.className = 'vchip' + (hOn[k] ? ' on' : '');
+      /* 【v0.33 修订】切换必须基于「**当前实际显示**的那几条」，而不是 hOn[k] 本身。
+       *
+       * 用户报的现象：打开时默认显示供水T1/回水T2/室外T4 三条、三个按钮都是亮的，
+       * 点「室外温度T4」却只剩它一条 —— 期望是它灰掉、保留供回水两条。
+       *
+       * 真因：刚查出来时 hOn 是**空的**（谁都没勾选过），那三条只是
+       * activeCurves 的兜底「默认前 3 条」。于是 `hOn[k] = !hOn[k]`
+       * 把一个 undefined 取反成 true，hOn 里就只剩 k 一个 ——
+       * 曲线从 3 条塌成 1 条。用户看到的是「点一下反而只剩它」，
+       * 语义正好反了：他点的是一条**正在显示**的线，期望是关掉它。
+       *
+       * 现在：先问「它现在显示着吗」，显示着就移出、不显示就加入，
+       * 算完把结果**整体写回 hOn** —— hOn 从此精确等于「实际显示哪些」，
+       * 再也不会出现「按钮亮着但 hOn 里没有」这种两边不一致的状态。 */
+      var cur = activeCurves();
+      var next = cur.slice();
+      var i = next.indexOf(k);
+      if (i >= 0) {
+        next.splice(i, 1);            // 正在显示 → 关掉它（用户这次的期望）
+      } else {
+        next.push(k);
+        /* 已满 6 条还点新的：挤掉第 5 条，把刚点的这条留在最后。
+           不这么处理的话，它会被 slice(0,6) 直接截掉，
+           结果就是「点了没反应」—— 比画错更让人莫名其妙。 */
+        if (next.length > 6) next = next.slice(0, 5).concat([k]);
+      }
+      hOn = {};
+      next.forEach(function (x) { hOn[x] = true; });
+      /* 用户已经动过了 —— 从这一刻起「空」就是用户的意思，
+         再不该被兜底顶回来（这正是用户报的「全点掉又变回三条」）。 */
+      hInit = true;
+      /* 所有 chip 按同一口径重画 */
+      var onNow = activeCurves();
+      m.querySelectorAll('[data-var]').forEach(function (x) {
+        x.className = 'vchip' + (onNow.indexOf(x.getAttribute('data-var')) >= 0 ? ' on' : '');
+      });
       drawChart();
     };
   });
@@ -371,6 +423,7 @@ function pickLocalDevice() {
         hAcc = G.histAcc;
         hDevLabel = G.histName || G.histNo;
         hOn = {};
+    hInit = false;
         closeBox();
         V_hist();
         doQuery();
@@ -436,6 +489,7 @@ function doQuery() {
     if (G.tab !== 'hist') return;
     G.hist = r;
     hOn = {};
+    hInit = false;
     var box2 = el('hRes');
     if (box2) box2.innerHTML = histResultHtml();
     bindHist();
@@ -541,13 +595,45 @@ function showFiles() {
 }
 
 /* ---------- 折线图 ---------- */
+
+/**
+ * 当前该显示哪几条曲线 —— **唯一口径**，按钮高亮与画布绘制都走它。
+ *
+ * 【v0.33 修复】原来这里是两套各算各的：
+ *   渲染按钮时（第 97 行附近）：on = hOn 过滤 → 空则取 keys.slice(0,3)，**不截 6**；
+ *   画曲线时（drawChart）    ：keys = hOn 过滤 → 空则取前 3 → **再截 6**。
+ * 两处 fallback 的截断规则不一致，于是出现用户截图那个现象：
+ * 按钮上「出水温度/进水温度」是亮的，图表里却画着「水流量」——
+ * 因为「都不勾选」这个状态下，按钮高亮的那 3 个和画布画的那 3 个
+ * 根本不保证是同一批；点一下取消勾选，两边就彻底错位。
+ * 现在统一：谁要显示哪些线，只由这一个函数说了算。
+ *
+ * series 允许显式传入：渲染按钮那一刻 G.hist 可能还是上一次的
+ * （用的是这次查询返回的局部 r），传进来才不会算错对象。
+ */
+function activeCurves(seriesIn) {
+  var series = seriesIn || (G.hist && G.hist.series) || {};
+  var all = Object.keys(series);
+  var on = all.filter(function (k) { return hOn[k]; });
+  /* 【v0.33 修订三】「默认前 3 条」只在**还没设置过**时兜底。
+     原来不管什么时候只要一个都没选，就强行顶回前 3 条 ——
+     于是用户把高亮的按钮一个个点掉，最后一条点完又被顶回来 3 条，
+     怎么关都关不掉（用户报的就是这个）。
+     现在区分两种「空」：
+       · 刚查出来、用户还没动过 → 兜底前 3 条（保持「先看个大概」的老体验）
+       · 用户已经动过、主动全关   → 就是空，一条都不画
+     hInit 就是这个「有没有被确定过」的标志：换设备/换时间重新查询会重置它。 */
+  if (!on.length && !hInit) on = all.slice(0, 3);
+  /* 最多 6 条：再多就糊成一片，看不出单条曲线 */
+  if (on.length > 6) on = on.slice(0, 6);
+  return on;
+}
+
 function drawChart() {
   var cv = el('hCv');
   if (!cv || !G.hist) return;
   var series = G.hist.series || {};
-  var keys = Object.keys(series).filter(function (k) { return hOn[k]; });
-  if (!keys.length) keys = Object.keys(series).slice(0, 3);
-  if (keys.length > 6) keys = keys.slice(0, 6);
+  var keys = activeCurves();
 
   var W = cv.width, H = cv.height;
   var g = cv.getContext('2d');
@@ -567,6 +653,22 @@ function drawChart() {
       if (v > vMax) vMax = v;
     });
   });
+  /* 【v0.33 修订三】一个变量都没选时（用户主动全关掉）：
+     画布上明确写一句「未选择变量」，别留一块空白让人以为图坏了。
+     注意下面 isFinite 的提前返回在无数据时也会走到，
+     所以这句提示放在两个分支之前，坐标轴那条路已经提前 return。 */
+  if (!keys.length) {
+    g.fillStyle = '#8b93a1';
+    g.font = '14px sans-serif';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillText('未选择变量 —— 点下面的变量名即可显示曲线', W / 2, H / 2);
+    var lg0 = el('hLg');
+    if (lg0) lg0.innerHTML = '';
+    var ax0 = el('hAx');
+    if (ax0) ax0.textContent = '未选择任何变量';
+    return;
+  }
   if (!isFinite(tMin)) return;
   if (tMax === tMin) tMax = tMin + 1;
   if (vMax === vMin) { vMax = vMin + 1; }

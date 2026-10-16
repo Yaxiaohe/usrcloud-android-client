@@ -80,6 +80,10 @@ public class MainActivity extends Activity {
            此时再 setEnabled(true) 会因「值没变」直接返回、调度器不会起，
            所以先把内存值清掉再调，强制走一次启动流程。 */
         Watch.restoreEnabled();
+        /* 【v0.33 修订四】恢复上次设置的轮询间隔。必须在 restoreEnabled 之前/之后都行，
+           但要在网页加载之前 —— 否则监控页首帧画的是默认 15 分钟，
+           用户会以为设置没保存。intervalSec 只影响后续调度与界面显示。 */
+        Watch.restoreInterval();
         /* 【v0.31】把上次巡检的设备列表读回来。用户反馈「每次重开 app，
            监控页的站点信息都是空的」—— 一轮巡检几十台还要限速，等的就是
            「一进来什么都没有」。先拿上次的结果顶上，新一轮跑完自然覆盖。
@@ -158,24 +162,41 @@ public class MainActivity extends Activity {
        消费后清空，避免下次正常启动又被当成跳转。 */
     private String openDevName = null;
     private String openAccName = null;
+    /* 【v0.33】只带 tab 不带设备名的跳转目标（如常驻通知「巡站监控运行中」）。
+       原来 readOpenTarget 只认 dev/acc，tab=watch 被整个忽略 ——
+       通知里明明写了「点此打开监控页」，落地却停在用户上次待的那个页签。 */
+    private String openTab = null;
 
     /** 把「点通知要跳到的设备」注入网页。页面没就绪时静默跳过（下次 onPageFinished 再来）。 */
     private void pushOpenTarget() {
         if (webRef == null) return;
-        if (openDevName == null || openDevName.isEmpty()) return;
+        /* 只有 tab 没有设备名时也要注入，别被 dev 为空卡掉 */
+        if ((openDevName == null || openDevName.isEmpty())
+                && (openTab == null || openTab.isEmpty())) return;
         try {
-            JSONObject o = new JSONObject();
-            o.put("dev", openDevName);
-            if (openAccName != null) o.put("acc", openAccName);
-            /* 用 JSONObject.quote 保证中文设备名/账号名进 JS 字符串是安全的，
-               否则名字里带引号或反斜杠会把注入的脚本拼坏。 */
-            webRef.evaluateJavascript(
-                    "window.onOpenTarget && window.onOpenTarget(" + o.toString() + ")", null);
+            String tab = openTab;
+            if (tab != null && !tab.isEmpty()) {
+                JSONObject t = new JSONObject();
+                t.put("tab", tab);
+                /* 用 JSONObject.quote 保证参数进 JS 字符串安全 */
+                webRef.evaluateJavascript(
+                        "window.onOpenTab && window.onOpenTab(" + t.toString() + ")", null);
+            }
+            if (openDevName != null && !openDevName.isEmpty()) {
+                JSONObject o = new JSONObject();
+                o.put("dev", openDevName);
+                if (openAccName != null) o.put("acc", openAccName);
+                /* 用 JSONObject.quote 保证中文设备名/账号名进 JS 字符串是安全的，
+                   否则名字里带引号或反斜杠会把注入的脚本拼坏。 */
+                webRef.evaluateJavascript(
+                        "window.onOpenTarget && window.onOpenTarget(" + o.toString() + ")", null);
+            }
         } catch (Throwable t) {
             Core.log("[跳转] 注入目标设备失败: " + t);
         } finally {
             openDevName = null;
             openAccName = null;
+            openTab = null;
         }
     }
 
@@ -198,6 +219,9 @@ public class MainActivity extends Activity {
             openDevName = dev;
             openAccName = (acc != null && !acc.isEmpty()) ? acc : null;
         }
+        /* 【v0.33】tab 单独记：常驻通知点进来只有 tab、没有 dev */
+        String tab = it.getStringExtra("tab");
+        if (tab != null && !tab.isEmpty()) openTab = tab;
     }
 
     @Override

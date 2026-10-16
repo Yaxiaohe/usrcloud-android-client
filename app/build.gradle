@@ -8,8 +8,8 @@ android {
         applicationId "org.usrcloud.xunjian"
         minSdk 21
         targetSdk 33
-        versionCode 10332
-        versionName "0.32"
+        versionCode 10333
+        versionName "0.33"
     }
 
     signingConfigs {

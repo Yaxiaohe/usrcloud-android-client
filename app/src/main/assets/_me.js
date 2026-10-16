@@ -22,8 +22,19 @@ var OPS = [
   /* 【v0.26】区间条件：val < 数值 < val2。
      供暖场景里「供回水温差正常、压力既不为零也不爆表」这类判断，
      原来只能建两条规则再靠「重复提醒」去凑，现在一条搞定。 */
-  { v: 'range', t: '介于' }
+  { v: 'range', t: '介于' },
+  /* 【v0.33】反向区间：不在区间内才提醒。
+     用户原话「加一个反向介于」。典型用法是「该有的数值没有」：
+     冬季供水温度应该在 8~30 之间，掉到 8 以下就该报 ——
+     这类判断以前只能写两条规则（小于8 或 大于30），一次故障出两条提醒、
+     冷却期还各自算一份，很别扭。 */
+  { v: 'notinrange', t: '不在区间内' }
 ];
+
+/* 【v0.33】反向区间的提示语。
+   特意写清楚「边界也算不在区间内」：按 v<=下限 或 v>=上限 判定，
+   压着 8.0 的数会报。这跟「介于」的开区间语义正好互补，用户不容易混。 */
+var NOTIN_RANGE_HINT = '不在区间内：数值落在两个数之外才提醒。如填 8 和 30 = 低于 8 或 高于 30 就提醒。压在 8 或 30 上也算「不在区间内」。两个框填反了会自动纠正。';
 
 /* 【v0.27】「介于」的提示语。
    之前写的是「大于下限且小于上限」，用户反馈拗口且分不清两个框谁是下限：
@@ -101,8 +112,12 @@ function V_me() {
       '<span class="tiny">没有规则时只统计状态，不产生提醒</span></div>';
   } else {
     rl.forEach(function (r, i) {
+      /* 【v0.33】有名称时把名称顶到标题行（和通知里显示的是同一个名字），
+         没有名称的老规则保持原样，不显示空标签。 */
+      var rn = (r.rule_name || '').trim();
       s += '<div class="item" data-ri="' + i + '">' +
-        '<div class="row"><div style="flex:1"><div class="t">' + kindText(r.kind) + '</div>' +
+        '<div class="row"><div style="flex:1"><div class="t">' +
+        (rn ? esc(rn) + ' · ' : '') + kindText(r.kind) + '</div>' +
         '<div class="s">' + ruleText(r) + '</div></div>' +
         /* 【v0.21 新增】编辑按钮。
            原来只有「删除」，改一条规则得先删掉再重新添加一遍 ——
@@ -208,7 +223,7 @@ function V_me() {
   /* 关于 */
   s += '<div class="card"><h2>关于</h2>' +
     '<div class="row tiny muted"><span>应用</span><span class="sp"></span>' +
-    '<span>有人云巡站 v' + esc(h.version || '0.31') + '</span></div>' +
+    '<span>有人云巡站 v' + esc(h.version || '0.33') + '</span></div>' +
     '<div class="row tiny muted" style="margin-top:7px"><span>说明</span><span class="sp"></span>' +
     '<span>与 Windows 版同一套接口与判定规则</span></div>' +
     '<div class="row tiny muted" style="margin-top:7px"><span>制作</span><span class="sp"></span>' +
@@ -233,12 +248,18 @@ function ruleText(r) {
     for (var i = 0; i < OPS.length; i++) if (OPS[i].v === r.op) op = r.op;
     /* 【v0.26】区间条件摘要写成「介于 8 ~ 30」，一眼能看懂。
        【v0.27】显示前也做 min/max 归一 —— 兼容 v0.26 期间存成
-       「下限>上限」的旧规则，摘要和实际判定一致。 */
-    if (op === 'range') {
+       「下限>上限」的旧规则，摘要和实际判定一致。
+       【v0.33】反向区间一并处理，摘要用「不在区间内」原文而不是拼英文 op。 */
+    if (op === 'range' || op === 'notinrange') {
       var lo = (r.val == null ? 0 : r.val);
       var hi = (r.val2 == null ? 0 : r.val2);
       if (lo > hi) { var tmp = lo; lo = hi; hi = tmp; }
-      t.push('变量 ' + (r.var || '*') + ' 介于 ' + lo + ' ~ ' + hi);
+      /* 两类区间用各自的句式，不要混：
+         range      → 「介于 8 ~ 30」
+         notinrange → 「不在区间内（低于 8 或 高于 30）」 */
+      t.push('变量 ' + (r.var || '*') + (op === 'range'
+        ? ' 介于 ' + lo + ' ~ ' + hi
+        : ' 不在区间内（低于 ' + lo + ' 或 高于 ' + hi + '）'));
     } else {
       t.push('变量 ' + (r.var || '*') + ' ' + opText(op) + ' ' + (r.val == null ? 0 : r.val));
     }
@@ -674,6 +695,14 @@ function editRule(idx) {
   if (!r) r = { acc: '*', dev: '*', var: '*', kind: 'offline', op: 'gt', val: 0, stale_min: 15 };
   var keepIdx = idx;
   openBox(isNew ? '新增规则' : '编辑规则',
+    /* 【v0.33】规则名称输入框，放在类型之上、账号之前 ——
+       用户原话「在账号上面加一个框供用户自定义填写这条规则的名称」。
+       它是这条规则的「标题」：下拉通知栏一屏都是长设备名时，
+       靠名字才能认出是哪条规则报的。留空也能存，
+       留空时通知标题照旧用设备名，老规则不受影响。 */
+    '<label class="fl">规则名称（选填，用于在通知里认出这条规则）</label>' +
+    '<input id="rName" maxlength="30" placeholder="如：冬季供水温度过低" value="' +
+    esc(r.rule_name || '') + '">' +
     '<label class="fl">类型</label><select id="rKind">' +
     KINDS.map(function (k) {
       return '<option value="' + k.v + '"' + (r.kind === k.v ? ' selected' : '') + '>' +
@@ -705,12 +734,15 @@ function editRule(idx) {
        提示语「大于下限且小于上限」也拗口，重写成大白话。 */
     '<input id="rVal" type="number" step="0.01" style="flex:1" placeholder="阈值" value="' +
     (r.val == null ? 0 : r.val) + '">' +
-    /* 【v0.26】区间条件的上限。只在 op=range 时显示（onchange 里切换）。 */
+    /* 【v0.26】区间条件的上限。只在区间类 op 时显示（onchange 里切换）。
+       【v0.33】notinrange（不在区间内）同样需要第二个框。 */
     '<input id="rVal2" type="number" step="0.01" style="flex:1' +
-    (r.op === 'range' ? '' : ';display:none') + '" placeholder="上限" value="' +
+    (r.op === 'range' || r.op === 'notinrange' ? '' : ';display:none') +
+    '" placeholder="上限" value="' +
     (r.val2 == null ? 0 : r.val2) + '"></div>' +
     '<div class="tiny muted" id="rOpHint" style="margin-top:6px">' +
-    (r.op === 'range' ? RANGE_HINT : '') + '</div></div>' +
+    (r.op === 'range' ? RANGE_HINT
+      : (r.op === 'notinrange' ? NOTIN_RANGE_HINT : '')) + '</div></div>' +
     '<div class="two" style="margin-top:16px">' +
     (isNew ? '<button data-no>取消</button><button class="pri" data-ok>添加</button>'
       : '<button class="dan" data-del2="1">删除</button><button class="pri" data-ok>保存</button>') +
@@ -722,13 +754,17 @@ function editRule(idx) {
     el('rValBox').style.display = k === 'value' ? '' : 'none';
   };
 
-  /* 【v0.26】切到「介于」时显示上限输入框，并更新提示语与 placeholder。
-     【v0.27】placeholder 动态切：介于时第一个框是「下限」，其余是「阈值」。 */
-  el('rOp').onchange = function () {
-    var isRange = this.value === 'range';
+/* 【v0.26】切到「介于」时显示上限输入框，并更新提示语与 placeholder。
+     【v0.27】placeholder 动态切：区间类第一个框是「下限」，其余是「阈值」。
+     【v0.33】反向区间（notinrange）走同一套：也要第二个框、也要下限提示，
+     只是提示语换成 NOTIN_RANGE_HINT。 */
+el('rOp').onchange = function () {
+    var op = this.value;
+    var isRange = (op === 'range' || op === 'notinrange');
     el('rVal2').style.display = isRange ? '' : 'none';
     el('rVal').placeholder = isRange ? '下限' : '阈值';
-    el('rOpHint').textContent = isRange ? RANGE_HINT : '';
+    el('rOpHint').textContent =
+        op === 'range' ? RANGE_HINT : (op === 'notinrange' ? NOTIN_RANGE_HINT : '');
   };
 
   var db = el('mbox').querySelector('[data-del2]');
@@ -742,21 +778,25 @@ function editRule(idx) {
   var okBtn = el('mbox').querySelector('[data-ok]');
   okBtn.onclick = function () {
     var obj = {
+      /* 【v0.33】规则名称。超长截断（后端也限 30），空串就存空串——
+         存 undefined 会在覆盖保存时把这个字段整个丢掉。 */
+      rule_name: (el('rName').value || '').trim().slice(0, 30),
       acc: el('rAcc').value.trim() || '*',
       dev: el('rDev').value.trim() || '*',
       var: '*',
       kind: el('rKind').value,
       op: el('rOp').value,
-      /* 【v0.27】阈值照常先读进来；range 时下面再按 min/max 归一覆盖 */
+      /* 【v0.27】阈值照常先读进来；区间类时下面再按 min/max 归一覆盖 */
       val: parseFloat(el('rVal').value) || 0,
-      /* 【v0.26】区间上限。非 range 时也存（默认 0），Java 侧只在 range 用它。 */
+      /* 【v0.26】区间上限。非区间类时也存（默认 0），Java 侧只在区间类用它。 */
       val2: parseFloat(el('rVal2').value) || 0,
       stale_min: parseInt(el('rStale').value, 10) || 15
     };
     if (obj.kind === 'value') obj.var = el('rVar').value.trim() || '*';
     if (obj.kind === 'offline') obj.stale_min = 15;
-    /* 【v0.27】介于：min/max 归一，填反了也按「小的=下限、大的=上限」存 */
-    if (obj.op === 'range' && obj.val > obj.val2) {
+    /* 【v0.27】介于：min/max 归一，填反了也按「小的=下限、大的=上限」存。
+       【v0.33】反向区间同样要归一 —— 「不在 30~8」按语义就该读成「不在 8~30」。 */
+    if ((obj.op === 'range' || obj.op === 'notinrange') && obj.val > obj.val2) {
       var tmp = obj.val; obj.val = obj.val2; obj.val2 = tmp;
     }
 

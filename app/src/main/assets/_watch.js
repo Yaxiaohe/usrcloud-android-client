@@ -336,7 +336,10 @@ function renderWatch() {
       s += '<div class="al clickable' + (a.level === 'critical' ? ' c' : '') + '"' +
         ' data-aldev="' + esc(a.dev) + '" data-alacc="' + esc(a.acc) + '">' +
         '<div class="t">' + esc(a.time) + ' · ' + esc(a.acc) + '</div>' +
-        '<div class="m">' + esc(a.dev) + (a.var && a.var !== '*' ? ' / ' + esc(a.var) : '') + '</div>' +
+        /* 【v0.33】用户给规则起的名字显示在设备名前面 —— 与通知标题同名，
+           提醒多起来时一眼能认出是哪条规则报的。老提醒没有这个字段，跳过。 */
+        '<div class="m">' + (a.rule_name ? esc(a.rule_name) + ' · ' : '') +
+        esc(a.dev) + (a.var && a.var !== '*' ? ' / ' + esc(a.var) : '') + '</div>' +
         '<div class="s" style="font-size:12.5px;color:#5c6472">' + esc(a.msg) + '</div>' +
         '<div class="almore tiny muted">点这条看该站点实时数据 ›</div></div>';
     });
@@ -998,6 +1001,24 @@ function doSetVar(acc, no, dev, varName, unit, rel, before, value) {
       };
     });
 }
+
+/**
+ * 【v0.33】原生注入的「只切页签」入口（常驻通知点进来就是这一条）。
+ *
+ * 之前只有 onOpenTarget（必须带 dev），原生侧也是只认 dev/acc —— 所以
+ * 那条常驻通知即使补上了 PendingIntent，进来也停在用户上次待的页签，
+ * 通知标题写着「点此打开监控页」却没去监控页。
+ * 这里做成独立的入口：只切页，不碰筛选、不展开任何设备。
+ */
+window.onOpenTab = function (t) {
+  if (!t || !t.tab) return;
+  var k = String(t.tab);
+  /* 白名单：原生传进来的是外部数据，不能直接拿去当页签 */
+  var ok = false;
+  (typeof TABS !== 'undefined' ? TABS : []).forEach(function (x) { if (x.k === k) ok = true; });
+  if (!ok) return;
+  if (typeof goNoHist === 'function') goNoHist(k);
+};
 
 /**
  * 【v0.30】点系统通知跳进来的入口。原生把通知里带的 {dev, acc} 传进来，

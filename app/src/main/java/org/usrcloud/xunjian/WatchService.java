@@ -132,6 +132,12 @@ public class WatchService extends Service {
             b.setStyle(new Notification.BigTextStyle().bigText(
                     "保持后台定时巡检，设备异常时才会弹通知。"
                     + "不需要监控时，在「监控」页关掉开关即可。"));
+            /* 【v0.33 修复】点这条常驻通知要能跳进 app。
+               原来没设 setContentIntent，前台服务通知的默认点击行为是
+               「什么都不发生」—— 用户点它毫无反应，还以为是 app 挂了。
+               这里显式挂一个 PendingIntent，直接落到监控页。 */
+            b.setContentIntent(openApp());
+            b.setContentTitle("巡站监控运行中 · 点此打开");
             b.setOngoing(true);      // 常驻，用户划不掉
             b.setShowWhen(false);
             b.setPriority(Notification.PRIORITY_MIN);
@@ -142,10 +148,40 @@ public class WatchService extends Service {
             return b.build();
         } catch (Throwable t) {
             Log.w(TAG, "构造常驻通知失败: " + t);
-            Notification.Builder b = new Notification.Builder(this)
-                    .setSmallIcon(R.drawable.ic_stat_warn)
+            Notification.Builder b = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                    ? new Notification.Builder(this, CH_RUN)
+                    : new Notification.Builder(this);
+            b.setSmallIcon(R.drawable.ic_stat_warn)
                     .setContentTitle("巡站监控运行中");
+            /* 兜底分支同样要能点开，别只在正常路径挂跳转 */
+            b.setContentIntent(openApp());
             return b.build();
+        }
+    }
+
+    /**
+     * 常驻通知的点击跳转：打开 app 并直接落到监控页。
+     *
+     * <p>requestCode 固定一个常量（不是 hashCode）——同一条通知会被反复
+     * setForeground 重建，如果 requestCode 跟着内容变，系统会认为是不同的
+     * PendingIntent，用户点到的可能是旧 Intent（带过期的 extras）。
+     */
+    private android.app.PendingIntent openApp() {
+        try {
+            Intent it = new Intent();
+            it.setClassName(getPackageName(), MainActivity.class.getName());
+            it.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                    | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            it.putExtra("tab", "watch");
+            int flags = android.app.PendingIntent.FLAG_UPDATE_CURRENT;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                flags |= android.app.PendingIntent.FLAG_IMMUTABLE;
+            }
+            return android.app.PendingIntent.getActivity(this, 1001, it, flags);
+        } catch (Throwable t) {
+            Log.w(TAG, "构造常驻通知跳转失败: " + t);
+            return null;
         }
     }
 }

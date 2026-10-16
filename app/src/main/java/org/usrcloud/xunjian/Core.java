@@ -44,7 +44,7 @@ public class Core {
        改一处两边同时生效。 */
     public static volatile int STALE_MINUTES = 15;
     public static final int MAX_CARDS = 10;
-    public static final String APP_VERSION = "0.32";
+    public static final String APP_VERSION = "0.33";
 
     /** 并发线程数，可在「我的 → 设置」里改，落盘到 设置.json */
     public static volatile int WORKERS = 4;
@@ -243,7 +243,15 @@ public class Core {
         BufferedReader r = new BufferedReader(new InputStreamReader(in, "UTF-8"));
         StringBuilder sb = new StringBuilder();
         String line;
-        while ((line = r.readLine()) != null) sb.append(line);
+        /* 【v0.33 修复】原来每行只 append(line)、**不补换行符**，
+           于是整个文件被拼成一大坨无换行的字符串。
+           读 JSON 的调用点无所谓（JSON 里本来就没换行），
+           但 accountsRaw()（账号表格原文）直接把这一坨塞进 textarea，
+           用户看到的就是「所有账号都在一行」——
+           而且保存时按行校验会认为只有 1 行、字段数对不上，直接把表拒掉。
+           现在行间补 \r\n：JSON 解析不受影响（org.json 允许空白），
+           CSV 原文恢复成真正的一行一个账号。 */
+        while ((line = r.readLine()) != null) sb.append(line).append("\r\n");
         r.close();
         return sb.toString();
     }
@@ -352,9 +360,9 @@ public class Core {
      * 强制把 assets 里的预置账号表覆盖到手机。【v0.20 新增】
      *
      * 【为什么必须有这个】seedAccountsIfAbsent 只在文件不存在时复制，
-     * 而覆盖安装不会删掉应用私有目录 —— 用户从旧版本升上来时，
-     * 手机里那份旧的 accounts.csv 原封不动还在。
-     * 于是会出现「我在新包里删掉的账号，怎么还在列表里」——
+     * 而覆盖安装不会删掉应用私有目录 —— 用户从 v0.18 升上来时，
+     * 手机里那份含线路丙、共 4 个账号的 accounts.csv 原封不动还在。
+     * 于是「我明明删了线路丙，怎么某线路还在」——
      * 用户看的是手机里的旧文件，不是新包里那份。
      *
      * 所以必须给一个用户主动可调的入口：清掉当前表，重新铺预置表。
@@ -402,6 +410,7 @@ public class Core {
         }
     }
 
+    /** 当前私有目录里那份账号表是不是已经比预置的旧（用于界面提示）。 */
     /** 当前私有目录里那份账号表是不是已经比预置的旧（用于界面提示）。
      *  本包不带任何预置账号（assets/accounts.csv 只有表头），
      *  所有账号都由用户自己添加，不存在「预置表里已删除、手机上还留着」的情况，
