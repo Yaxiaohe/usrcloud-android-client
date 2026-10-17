@@ -196,6 +196,14 @@ public class Notifier {
                不带的话只能落到监控页顶部，用户还得在几十台里自己找。 */
             if (dev != null && !dev.isEmpty()) it.putExtra("dev", dev);
             if (acc != null && !acc.isEmpty() && !acc.equals("-")) it.putExtra("acc", acc);
+            /* 【v0.33 修订五】显式 action：和常驻通知（WatchService.openApp）的
+               PendingIntent 签名分开。原来两边都没设 action、又都指向 MainActivity，
+               判等只看 requestCode + action + data + type + component，
+               提醒的 seq 首条 id 恰好是 1001，和常驻通知原来的 requestCode
+               撞成同一条 PendingIntent —— 谁后建就覆盖谁的 extras，
+               表现为「规则一命中，点常驻通知就跳去最后一个命中的站点」。
+               现在两边各自带 action，签名永远不同，互不覆盖。 */
+            it.setAction("org.usrcloud.xunjian.action.OPEN_ALERT");
             int flags = PendingIntent.FLAG_UPDATE_CURRENT;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 flags |= PendingIntent.FLAG_IMMUTABLE;

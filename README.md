@@ -65,6 +65,13 @@ APK 约 1.5 MB。
 
 ### 同版本修订
 
+- **2026-10-17（版本号仍为 0.33）**：修「常驻通知被规则命中带跑」。
+  `PendingIntent` 判等**不看 extras**，只比 `requestCode + action + data + type + component`；
+  常驻通知写死 `requestCode 1001`、提醒通知的 seq 首条恰好也是 1001，
+  两边又都不设 action、都指向 `MainActivity` —— 在系统眼里是同一条。
+  配合 `FLAG_UPDATE_CURRENT`，第一条规则命中就把常驻通知的点击目标改写成了那台设备。
+  现在两边各带独有 action（`OPEN_WATCH` / `OPEN_ALERT`），常驻通知用 `requestCode 9002`，
+  并且它的 Intent **只带 tab**、永远不放 `dev`/`acc`。
 - **2026-10-15（版本号仍为 0.32）**：修「设置巡检间隔后界面不刷新」。
   原来设完直接调 `renderWatch()`，渲染的是内存里的旧快照，
   分段控件高亮和「启动后每 X 自动巡检一次」的文案都停在旧值，

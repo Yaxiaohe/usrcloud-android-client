@@ -43,6 +43,18 @@ public class WatchService extends Service {
     private static final String TAG = "watchsvc";
     private static final String CH_RUN = "patrol_run";
     private static final int ID_RUN = 9001;
+    /* 【v0.33 修订五】常驻通知跳转专用的 requestCode 与 action。
+       为什么必须单独一套：PendingIntent 的相等性判定（Intent.filterEquals）
+       只看 requestCode + action + data + type + component，**不看 extras**。
+       Notifier 那边提醒通知的 id 是 seq 自增（初值 1000，首条就是 1001），
+       且同样指向 MainActivity、不设 action —— 和这边原来的 requestCode 1001
+       在系统眼里就是**同一条 PendingIntent**。两边又都用了 FLAG_UPDATE_CURRENT
+       （谁后建就用谁的 extras 覆盖），于是规则一命中，常驻通知的点击目标
+       就被改写成「最后一个命中的站点」，用户点「运行中」直接跳去那台设备。
+       所以这里 requestCode 用 9002（远离 seq 区间），再给独有 action+data
+       双保险：就算 requestCode 将来真的撞上，签名不同也不会被并成一条。 */
+    private static final int REQ_RUN = 9002;
+    private static final String ACTION_OPEN_WATCH = "org.usrcloud.xunjian.action.OPEN_WATCH";
 
     public static void start(Context ctx) {
         try {
@@ -162,9 +174,16 @@ public class WatchService extends Service {
     /**
      * 常驻通知的点击跳转：打开 app 并直接落到监控页。
      *
-     * <p>requestCode 固定一个常量（不是 hashCode）——同一条通知会被反复
+     * <p>【v0.33 修订五】这条 Intent 的签名必须和提醒通知（Notifier.openApp）
+     * 完全分开。详见 REQ_RUN 处的注释：extras 不参与 PendingIntent 判等，
+     * 光靠 requestCode 分离不够彻底，action+data 也要各自独有。
+     *
+     * <p>requestCode 用一个固定常量（不是 hashCode）——同一条通知会被反复
      * setForeground 重建，如果 requestCode 跟着内容变，系统会认为是不同的
      * PendingIntent，用户点到的可能是旧 Intent（带过期的 extras）。
+     *
+     * <p>注意这条 Intent **只带 tab**，永远不放 dev/acc：
+     * 常驻通知的语义就是「回到监控页」，跳具体设备是提醒通知的活。
      */
     private android.app.PendingIntent openApp() {
         try {
@@ -174,11 +193,15 @@ public class WatchService extends Service {
                     | Intent.FLAG_ACTIVITY_CLEAR_TOP
                     | Intent.FLAG_ACTIVITY_SINGLE_TOP);
             it.putExtra("tab", "watch");
+            /* 独有签名：与 Notifier 的提醒 Intent 分开（见 REQ_RUN 注释）。
+               组件是指定的，action/data 不参与解析，只用于 PendingIntent 判重。 */
+            it.setAction(ACTION_OPEN_WATCH);
+            it.setData(android.net.Uri.parse("xunjian://watch"));
             int flags = android.app.PendingIntent.FLAG_UPDATE_CURRENT;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 flags |= android.app.PendingIntent.FLAG_IMMUTABLE;
             }
-            return android.app.PendingIntent.getActivity(this, 1001, it, flags);
+            return android.app.PendingIntent.getActivity(this, REQ_RUN, it, flags);
         } catch (Throwable t) {
             Log.w(TAG, "构造常驻通知跳转失败: " + t);
             return null;
