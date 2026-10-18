@@ -117,11 +117,13 @@ public class Renderer {
     public static void render(String devName, String devNo, DevData data,
                               String outPath, String status) throws Exception {
         // ---- 数据准备 ----
+        /* 【v0.34】水温相关的变量排最前，其余保持平台原顺序（稳定分组）。
+         * 关键顺序：**先排再截断**。平台返回的顺序是「谁先建的谁在前」，
+         * 一台 17 变量的机组前十个位置常被水流量 / 定时使能 / 启动信号占满，
+         * 用户最关心的供回水温度会落在 MAX_CARDS 的截断之外 —— 截图里干脆没有。
+         * 排序规则和截断都在 ShotOrder 里（零依赖纯函数，jshotordertest 逐条验算）。 */
         List<String[]> cards = new ArrayList<>();
-        int n = Math.min(Core.MAX_CARDS, data.rows.size());
-        for (int i = 0; i < n; i++) {
-            String[] row = data.rows.get(i);
-            if (row.length < 5) continue;
+        for (String[] row : ShotOrder.arrange(data.rows, Core.MAX_CARDS)) {
             String name = row[1], tm = row[3], cur = row[4];
             String val, unit;
             Matcher m = NUM_UNIT.matcher(cur == null ? "" : cur);

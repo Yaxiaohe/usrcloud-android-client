@@ -44,7 +44,7 @@ public class Core {
        改一处两边同时生效。 */
     public static volatile int STALE_MINUTES = 15;
     public static final int MAX_CARDS = 10;
-    public static final String APP_VERSION = "0.33";
+    public static final String APP_VERSION = "0.34";
 
     /** 并发线程数，可在「我的 → 设置」里改，落盘到 设置.json */
     public static volatile int WORKERS = 4;
@@ -1118,9 +1118,10 @@ public class Core {
                                     } catch (Exception pe) {
                                         Log.w("patrol", "截图发布异常: " + pe);
                                     }
-                                    String vn = data.rows.size() + " 个变量";
+                                    String vn = data.rows.size() + " 个变量（水温优先）";
                                     if (data.rows.size() > MAX_CARDS) {
-                                        vn = "前 " + MAX_CARDS + "/" + data.rows.size() + " 个变量";
+                                        vn = "显示 " + MAX_CARDS + "/" + data.rows.size()
+                                                + " 个变量（水温优先）";
                                     }
                                     String preview = d.name + " | " + vn + " | 数据"
                                             + DevData.fmtAge(data.ageMinutes());

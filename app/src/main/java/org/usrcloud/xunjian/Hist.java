@@ -273,10 +273,9 @@ public class Hist {
 
     /** 变量名里是否含温度相关字样。 */
     static boolean isTempVar(String name) {
-        if (name == null) return false;
-        String s = name.trim().toLowerCase(Locale.CHINA);
-        return s.contains("温度") || s.contains("temp") || s.contains("℃")
-                || s.contains("°c") || s.contains("度");
+        /* 【v0.34】实现搬到 ShotOrder：历史页和截图现在都要认温度，
+         * 口径必须一模一样，否则同一台设备在两处看到的先后顺序会打架。 */
+        return ShotOrder.isTempVar(name);
     }
 
     private static JSONObject pack(Map<String, List<long[]>> series,

@@ -223,7 +223,7 @@ function V_me() {
   /* 关于 */
   s += '<div class="card"><h2>关于</h2>' +
     '<div class="row tiny muted"><span>应用</span><span class="sp"></span>' +
-    '<span>有人云巡站 v' + esc(h.version || '0.33') + '</span></div>' +
+    '<span>有人云巡站 v' + esc(h.version || '0.34') + '</span></div>' +
     '<div class="row tiny muted" style="margin-top:7px"><span>说明</span><span class="sp"></span>' +
     '<span>与 Windows 版同一套接口与判定规则</span></div>' +
     '<div class="row tiny muted" style="margin-top:7px"><span>制作</span><span class="sp"></span>' +
