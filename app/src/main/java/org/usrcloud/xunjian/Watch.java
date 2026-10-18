@@ -179,6 +179,11 @@ public class Watch {
             Executors.newSingleThreadScheduledExecutor();
     private static ScheduledFuture<?> handle;
 
+    /** 【v0.33 修订八】调度代次。setEnabled(true)/setInterval 重建调度时 +1，
+     *  正在跑的那一拍收尾时发现代次变了就不再续命 —— 否则「停→开」瞬间
+     *  如果正有一轮在跑，会出现两条调度链，巡检翻倍跑。 */
+    private static volatile int schedGen = 0;
+
     public static class DevState {
         public String acc;
         public String no;
@@ -355,20 +360,7 @@ public class Watch {
         if (on) {
             Core.log("[监控] 启动监控，间隔 " + (intervalSec / 60) + " 分钟");
             if (handle == null || handle.isCancelled()) {
-                handle = SCHED.scheduleWithFixedDelay(() -> {
-                    /* 原子守卫：上一轮还没跑完（或手动巡检进行中）就跳过这一拍，
-                       不并发、不堆积。CAS 失败说明有别的扫描在跑，直接 return，
-                       下一拍调度照常进行 —— 不会因此停摆。 */
-                    if (!WatchGuard.tryBeginScan()) return;
-                    try {
-                        if (enabled) scan();
-                    } catch (Throwable e) {
-                        Core.log("[监控] 巡检异常: " + e);
-                    } finally {
-                        WatchGuard.scanning.set(false);
-                        scanProgress = null;
-                    }
-                }, 2, intervalSec, TimeUnit.SECONDS);
+                scheduleNext(2, ++schedGen);
             }
         } else {
             Core.log("[监控] 已暂停监控");
@@ -388,6 +380,81 @@ public class Watch {
         if (enabled) {
             setEnabled(false);
             setEnabled(true);
+        }
+    }
+
+    /**
+     * 【v0.33 修订八】按「本轮开始时刻」对齐的下一拍。
+     *
+     * <p>原来用 {@code scheduleWithFixedDelay}：下一拍 = 本轮**结束** + 间隔，
+     * 于是实际周期变成「间隔 + 巡检耗时」—— 用户设 15 分钟，两轮之间看到的
+     * 是 17~19 分钟（72 台设备一轮要跑两三分钟）。现在改成自调度：
+     * 下一拍 = max(30 秒, 间隔 - 本轮耗时)，让「上次巡检」的间隔真正贴近设定值；
+     * 万一本轮跑超了，也至少歇 30 秒再跑，不连着打平台。
+     *
+     * <p>另外两件事一起管住：
+     * ① CAS 守卫：上一轮没跑完（或手动巡检在跑）就跳过这一拍，不并发不堆积；
+     * ② 代次校验：停→开/改间隔会重建调度，旧链收尾时发现代次变了就不再续命，
+     * 不会出现两条链各跑各的。
+     */
+    private static void scheduleNext(long delaySec, int gen) {
+        handle = SCHED.schedule(() -> {
+            long t0 = System.currentTimeMillis();
+            if (WatchGuard.tryBeginScan()) {
+                try {
+                    if (enabled) scan();
+                } catch (Throwable e) {
+                    Core.log("[监控] 巡检异常: " + e);
+                } finally {
+                    WatchGuard.scanning.set(false);
+                    scanProgress = null;
+                }
+            }
+            if (!enabled || gen != schedGen) return;
+            long dur = (System.currentTimeMillis() - t0) / 1000;
+            /* 延迟算法在 ScanClock.nextDelaySec 里，能被 jscanclocktest 逐条验算 */
+            scheduleNext(ScanClock.nextDelaySec(intervalSec, dur), gen);
+        }, delaySec, TimeUnit.SECONDS);
+    }
+
+    /**
+     * 【v0.33 修订八】回到前台时补跑。
+     *
+     * <p>用户报「十五分钟的周期怎么会出现 20 分钟前」：那个数字是**数据年龄**
+     * （设备最后上报距今），本身可以超过巡检周期；但截图里「上次巡检 20:29」
+     * 到当时 20:48 已经 19 分钟，超过 15 分钟周期 —— 确实还有第二个问题：
+     * app 退到后台/锁屏后，Android 的单调时钟在深度睡眠里不前进，
+     * 定时器的那 15 分钟被拖成了二十多分钟，回到前台又没有任何补跑。
+     *
+     * <p>现在 onResume 调这里：只要距上次巡检超过一个周期（且没有扫描在跑），
+     * 立刻补一轮 —— 用户打开 app 看到的是新鲜数据，而不是干等下一拍。
+     *
+     * @return true 表示已发起补跑（异步）
+     */
+    public static synchronized boolean catchUpIfOverdue() {
+        if (!enabled) return false;
+        if (WatchGuard.scanning.get()) return false;
+        long last = lastScanMillis();
+        long now = System.currentTimeMillis();
+        /* 判据在 ScanClock.isOverdue（零依赖、可单独验算边界） */
+        if (!ScanClock.isOverdue(last, now, intervalSec)) return false;
+        Core.log("[监控] 距上次巡检 "
+                + (last > 0 ? ((now - last) / 1000) + " 秒" : "未知（还没跑过）")
+                + "，已满 " + (intervalSec / 60) + " 分钟周期，回前台补跑一轮");
+        scanAsync();
+        return true;
+    }
+
+    /** lastScan 可能是「2026-10-18 20:29:05（异常：xxx）」，取前 19 位解析。 */
+    private static long lastScanMillis() {
+        if (lastScan == null) return -1;
+        String s = lastScan.trim();
+        if (s.length() < 19) return -1;
+        try {
+            return new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.CHINA)
+                    .parse(s.substring(0, 19)).getTime();
+        } catch (Exception e) {
+            return -1;
         }
     }
 

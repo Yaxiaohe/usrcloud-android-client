@@ -252,6 +252,13 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        /* 【v0.33 修订八】回到前台先看要不要补跑。
+           app 在后台/锁屏时，Android 的单调时钟在深度睡眠里不前进，
+           15 分钟的巡检可能被拖成二十多分钟（用户报的「15 分钟周期怎么
+           会出现 20 分钟前」就是这种：上次 20:29，回到前台已经 20:48）。
+           这里超期就立刻补一轮，等用户翻到监控页时数据已经是新的。
+           不超期/没开监控/正在跑都会直接返回，不会白跑。 */
+        Watch.catchUpIfOverdue();
         // 从系统「所有文件访问」设置页返回时，授权状态可能变了，通知前端刷新
         if (webRef == null) return;
         boolean now = hasAllFilesAccess();

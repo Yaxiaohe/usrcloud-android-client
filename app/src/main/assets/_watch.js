@@ -70,7 +70,34 @@ var fold = {};
 function lastScanText(m) {
   if (m.scanning) return '巡检中…';
   if (!m.last_scan) return '未巡检';
-  return '上次 ' + esc(String(m.last_scan).replace('T', ' ').slice(5, 16));
+  /* 【v0.33 修订八】带上「多久之前」：只写「上次 20:29」时，
+     用户得自己跟状态栏对时才能发现已经过了 19 分钟。 */
+  var ms = parseDataTime(m.last_scan);
+  var ago = ms < 0 ? '' : '（' + Math.round((Date.now() - ms) / 60000) + ' 分钟前）';
+  return '上次 ' + esc(String(m.last_scan).replace('T', ' ').slice(5, 16)) + ago;
+}
+
+/* 【v0.33 修订八】超期提示文案；没超期返回 null。
+ *
+ * 用户报「十五分钟的周期怎么会出现 20 分钟前」，其实是两件事叠在一起：
+ *   ① 行首「20 分钟前」是**数据年龄**（设备最后上报距今），设备本身可能
+ *      好几分钟才上报一次，所以数字可以超过轮询周期；
+ *   ② 但「上次巡检」也已经 19 分钟没动了，超过设定的 15 分钟 ——
+ *      app 在后台/锁屏时系统会冻结定时器，回来又没补跑。
+ * ①是事实，②是问题。后端已加「回前台超期补跑」（Watch.catchUpIfOverdue），
+ * 这里负责把②的状态摊开说，别让用户对着两个数字自己猜。
+ */
+function overdueText(m) {
+  var ms = parseDataTime(m.last_scan);
+  if (ms < 0) return null;
+  var iv = m.interval || 900;
+  var sec = (Date.now() - ms) / 1000;
+  if (sec <= iv + 60) return null;      // 留 60 秒余量，别因为几秒抖动就报警
+  /* 只说算得出的事实（距上次巡检多少分钟 / 你设的周期多少分钟），
+     不写「因为是系统推迟」这种没当场证据的原因 —— 原因在日志页里查。 */
+  return '距上次巡检已 ' + Math.round(sec / 60) + ' 分钟，超过你设的 ' +
+    Math.round(iv / 60) + ' 分钟周期。回到前台会自动补跑一轮，' +
+    '也可以点「立即巡检」马上跑；原因看「日志」页（每轮都记了用时和异常）。';
 }
 
 /* 后台轮询：只刷统计条和设备列表，不动搜索框（避免打断输入） */
@@ -113,6 +140,14 @@ function softWatch() {
      「不自动更新，只能通过切换界面才有变化」。 */
   var ls = el('wLast');
   if (ls) ls.textContent = lastScanText(m);
+  /* 【v0.33 修订八】超期提示跟着 3 秒轮询走：页面停着不动时，
+     刚进来还不超期，过了几分钟就该提示了。 */
+  var ov = el('wOverdue');
+  if (ov) {
+    var od2 = overdueText(m);
+    ov.textContent = od2 || '';
+    ov.style.display = od2 ? '' : 'none';
+  }
   /* 设备列表：只替换 #devList，搜索框不动。
      替换 innerHTML 会连同 onclick 一起冲掉，
      所以换完必须重新绑定 bindDevRows()，否则设备行点不动。
@@ -375,6 +410,11 @@ function renderWatch() {
   s += '<div class="muted tiny" style="margin-top:6px">' +
     '启动后每 ' + fmtIv(m.interval) + '自动巡检一次，命中规则时推送提醒并写入历史数据。' +
     '点「立即巡检」只跑一次、不计入自动周期。</div>';
+  /* 【v0.33 修订八】超期提示：距上次巡检超过一个周期才出现。
+     平时不渲染文字（display:none），softWatch 每 3 秒按最新时间重算。 */
+  var od = overdueText(m);
+  s += '<div class="bar w" id="wOverdue" style="margin-top:10px' +
+    (od ? '' : ';display:none') + '">' + (od ? esc(od) : '') + '</div>';
   /* 【v0.31】列表来自磁盘快照时必须说清楚。
      用户提出「每次重开 app 监控页站点信息都是空的」→ 现在改成读上次的结果，
      但这样一来屏幕上是一份**旧数据**：不说明的话，用户会把几个小时前的值
