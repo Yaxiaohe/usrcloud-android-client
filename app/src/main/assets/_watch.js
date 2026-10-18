@@ -126,6 +126,7 @@ function softWatch() {
   }
   var cnt = el('dvCnt');
   if (cnt) cnt.textContent = filteredDevs().length + ' 台';
+  startAgeTicker();
 }
 
 /* 当前要显示的设备：先按统计条状态筛，再按搜索框关键词筛。
@@ -174,6 +175,69 @@ function filteredDevs() {
   return list;
 }
 
+/* 【v0.33 修订七】「多久之前」必须**现算**，不能照抄后端给的字符串。
+ *
+ * 用户截图里的现象：状态栏 10:43，5 号站行首写着「刚刚」，可展开后
+ * 数据时间明明白白是 10:39 —— 同一个站点的两个说法自相矛盾。
+ *
+ * 根因：age_text 是后端在**巡检那一刻**算好的静态字符串
+ * （Watch.stateJson 里 fmtAge(s.ageMin)，s.ageMin 也是扫描时算的）。
+ * 前端拿到什么就显示什么，两轮轮询之间它一直冻在那里：
+ * 10:39 巡检时数据刚上来，算出来是「刚刚」；到 10:43 还是「刚刚」。
+ *
+ * 现在改成：渲染时用 data_time 现算，另有 tickAges() 每 30 秒刷一次，
+ * 页面停着不动、文案也会自己走。
+ */
+function parseDataTime(s) {
+  /* 统一成 ISO 形态再交给 Date：'2026-10-18 10:39:00' → '2026-10-18T10:39:00'。
+     WebView(V8) 按**本地时区**解析，与 Java 侧 SimpleDateFormat 口径一致。
+     带 T 的（部分快照/测试数据）原样可用；解析不了返回 -1。 */
+  if (!s || s === '--') return -1;
+  var t = new Date(String(s).replace(' ', 'T')).getTime();
+  return isNaN(t) ? -1 : t;
+}
+
+/* 与 Java DevData.fmtAge 一字不差的口径 —— 两边说法不能打架 */
+function fmtAgeText(min) {
+  if (min < 0) return '无数据时间';
+  if (min < 0.5) return '刚刚';
+  if (min < 60) return Math.round(min) + ' 分钟前';
+  if (min < 60 * 24) return (min / 60).toFixed(1) + ' 小时前';
+  return (min / 60 / 24).toFixed(1) + ' 天前';
+}
+
+/* data_time → 「多久之前」。解析不了返回 null，调用方退回后端 age_text */
+function ageTextOf(t) {
+  var ms = parseDataTime(t);
+  if (ms < 0) return null;
+  return fmtAgeText((Date.now() - ms) / 60000);
+}
+
+/* 每 30 秒把页面上所有 [data-age-t] 重算一遍。
+   只动这一句文案，不碰状态色块 —— 在线/陈旧/离线的阈值在后端，
+   前端擅自改判定会和用户设置的阈值对不上。
+
+   用「自适应 setTimeout 链」而不是 setInterval：
+   离开监控页后下一次触发发现 tab 不对就停，不再空转；
+   回到监控页由 renderWatch/softWatch 重新挂上。 */
+var ageTid = null;
+function tickAges() {
+  var nodes = document.querySelectorAll('[data-age-t]');
+  for (var i = 0; i < nodes.length; i++) {
+    var tx = ageTextOf(nodes[i].getAttribute('data-age-t'));
+    if (tx !== null && nodes[i].textContent !== tx) nodes[i].textContent = tx;
+  }
+}
+function startAgeTicker() {
+  if (ageTid !== null) return;
+  ageTid = setTimeout(function () {
+    ageTid = null;
+    if (G.tab !== 'watch') return;   // 已经离开监控页：停，别空转
+    tickAges();
+    startAgeTicker();                // 还在页面上：继续下一拍
+  }, 30000);
+}
+
 function devListBody() {
   var dv = (G.ws && G.ws.devices) || [];
   if (!dv.length) {
@@ -192,9 +256,16 @@ function devListBody() {
   return '<div style="margin-top:10px">' + list.map(function (d) {
     /* 展开态由 openDev 还原，避免后台轮询把用户点开的行合上 */
     var open = openDev[d.no] ? ' open' : '';
+    /* 【v0.33 修订七】「多久之前」现算（见 ageTextOf 上方注释）。
+       能解析 data_time 就挂 data-age-t，交给 tickAges 定时刷新；
+       解析不了才退回后端 age_text —— 老快照里可能没有 data_time。 */
+    var at = ageTextOf(d.data_time);
     return '<div class="dv' + open + '" data-dvno="' + esc(d.no) + '">' +
       '<div class="h"><span class="nm">' + esc(d.name) + '</span>' +
-      stPill(d.status) + '<span class="tiny muted">' + esc(d.age_text || '') + '</span>' +
+      stPill(d.status) +
+      '<span class="tiny muted"' +
+      (at === null ? '' : ' data-age-t="' + esc(d.data_time) + '"') + '>' +
+      esc(at === null ? (d.age_text || '') : at) + '</span>' +
       '<span class="ar">⌄</span></div>' +
       '<div class="tiny muted">' + esc(d.acc) + '</div>' +
       '<div class="vars">' +
@@ -598,6 +669,8 @@ function bindWatch() {
 
   bindStat();
   bindDevRows();
+  /* 首屏就要把「多久之前」的走字表挂上，否则页面停着不动文案会冻住 */
+  startAgeTicker();
 }
 
 /* 统计条点击：筛设备列表。

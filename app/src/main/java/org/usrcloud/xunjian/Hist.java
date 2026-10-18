@@ -477,6 +477,51 @@ public class Hist {
     }
 
     /**
+     * 按文件名取历史文件的 File（导出用）。【v0.33 修订六】
+     *
+     * <p>校验规则与 {@link #clean} 完全一致：两个已知前缀之一 + .csv 结尾 +
+     * 不含路径分隔符和 .. + canonical 路径必须还在 histDir 直下。
+     * 名字来自前端勾选，不能信；文件不存在也返回 null。
+     */
+    public static File fileByName(String name) {
+        if (name == null || name.isEmpty()) return null;
+        if (!name.startsWith(REC_PREFIX) && !name.startsWith(MAN_PREFIX)) return null;
+        if (!name.endsWith(".csv")) return null;
+        if (name.contains("/") || name.contains("\\") || name.contains("..")) return null;
+        try {
+            File dir = histDir();
+            File f = new File(dir, name);
+            /* canonical 校验双保险：拼出来的路径必须还在 histDir 直下 */
+            if (!f.getParentFile().getCanonicalPath().equals(dir.getCanonicalPath())) {
+                return null;
+            }
+            return f.exists() ? f : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * 导入文件的落点。【v0.33 修订六】
+     *
+     * <p>固定用「历史数据_导入_时间戳.csv」：既带手动保存的前缀（MAN_PREFIX），
+     * 又不会和监控自动落盘（监控记录_YYYY-MM.csv）、手动保存
+     * （历史数据_YYYY-MM.csv）重名。同一秒导入两次就加序号 ——
+     * 导入是「往里添数据」，任何时候都不允许覆盖已有文件。
+     */
+    public static File importTarget() {
+        File dir = histDir();
+        String base = MAN_PREFIX + "导入_"
+                + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.CHINA).format(new Date());
+        File f = new File(dir, base + ".csv");
+        int i = 1;
+        while (f.exists()) {
+            f = new File(dir, base + "_" + (i++) + ".csv");
+        }
+        return f;
+    }
+
+    /**
      * 按文件名清单删除历史文件。【v0.27】
      *
      * 【为什么按名单删，而不是「保留最近 N 个月」】

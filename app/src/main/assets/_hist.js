@@ -4,7 +4,13 @@ var HOURS = [
   { v: 168, t: '7天' }, { v: 720, t: '30天' }
 ];
 var PAL = ['#2b62e0', '#12a19a', '#d97a29', '#7c5cff', '#e0518a', '#2f9e44'];
-var hSrc = 'local';
+/* 【v0.33 修订六】移除「平台云端」来源。
+   原云端历史走 history.usr.cn:7002 的 historyData 接口，实测该路径
+   HTTP 404（平台已下线）；新控制台的多曲线历史接口
+   （new.cloudapi.usr.cn/usrCloud/datadic/getMultiCurveDataPointHistory）
+   属于另一套设备体系，本账号的设备不在其中（getDevs 为空），
+   参数结构也探不明。功能既然拉不通，留着只会让用户点了没反应 ——
+   删掉，只保留本地记录（监控自动落盘 + 导入，足够用）。 */
 /* 【v0.28】默认 24 小时。原来默认 7 天：一是读的文件多、出图慢，
    二是 7 天的曲线挤在一起看不出细节，真要查长期趋势再点一下就好。 */
 var hHours = 24;
@@ -19,14 +25,7 @@ var hDevLabel = '';   // 【v0.28】已选设备的显示名（本地直选时�
 
 function V_hist() {
   if (G.tab !== 'hist') return;
-  var s = '<div class="card"><h2>数据来源</h2><div class="seg" id="hSeg">' +
-    '<div class="s' + (hSrc === 'local' ? ' on' : '') + '" data-src="local">本地记录</div>' +
-    '<div class="s' + (hSrc === 'cloud' ? ' on' : '') + '" data-src="cloud">平台云端</div>' +
-    '</div><div class="muted tiny" style="margin-top:9px" id="hTip">' +
-    (hSrc === 'local' ? '读取监控引擎自动落盘的 CSV，不消耗平台请求。'
-      : '走平台历史库接口查询，会消耗请求额度。') + '</div></div>';
-
-  s += '<div class="card"><h2>时间范围</h2><div class="seg" id="hhSeg">' +
+  var s = '<div class="card"><h2>时间范围</h2><div class="seg" id="hhSeg">' +
     HOURS.map(function (x) {
       return '<div class="s' + (hHours === x.v ? ' on' : '') + '" data-hh="' + x.v + '">' +
         x.t + '</div>';
@@ -34,50 +33,26 @@ function V_hist() {
 
   /* 汇总模式：hAcc = '' 表示「全部账号」，此时后端跨账号汇总所有变量 */
   var allAcc = (hAcc === '');
-  var accLabel = allAcc ? '全部账号（汇总所有设备）' : hAcc;
 
-  if (hSrc === 'local') {
-    /* 【v0.28】本地记录：两步出图。
-       原来要「选账号 → 读取设备 → 选设备 → 查询」四步，其中「读取设备」
-       还是走平台接口拉全量设备（耗额度，且线上有的设备本地未必有记录，
-       点进去是张空图）。现在设备列表直接从本地 CSV 里提（histDevs），
-       跨账号一次列全，点一台就出图。
-       账号不单独选了 —— 设备行里带着账号名，搜索框也能按账号搜。 */
-    s += '<div class="card"><h2>选择设备</h2>' +
-      '<button class="pick" id="hPick"><span class="pf' +
-      (hDevLabel ? '' : ' ph') + '">' +
-      esc(hDevLabel || '点击选择设备') + '</span><span class="ar">›</span></button>' +
-      '<div class="muted tiny" style="margin-top:9px">' +
-      (allAcc
-        ? '正在汇总全部设备的记录，变量名会带「设备名·」前缀。'
-        : '列表直接来自本地落盘记录，不发平台请求；可以按站名、编号或账号搜索。') +
-      '</div>' +
-      '<div class="row" style="margin-top:10px">' +
-      '<button class="sm" id="hAll">全部设备汇总</button>' +
-      (hDevLabel ? '<button class="sm" id="hSwap">换一台设备</button>' : '') +
-      '</div></div>';
-  } else {
-    s += '<div class="card"><h2>选择账号</h2>' +
-      '<button class="pick" id="hAcc"><span class="pf' + (accLabel ? '' : ' ph') + '">' +
-      esc(accLabel || '点击选择账号') + '</span><span class="ar">›</span></button>' +
-      '<div class="muted tiny" style="margin-top:9px">' +
-      (allAcc
-        ? '正在汇总全部启用账号下所有设备的记录，变量名会带「设备名·」前缀。'
-        : '点上面一行可以换账号，列表里有「全部账号」。') + '</div>' +
-      '<div class="row" style="margin-top:10px">' +
-      '<button class="sm" id="hLoad">⬇ 读取设备</button>' +
-      '<button class="sm" id="hQuery"' + (hAcc === null ? ' disabled' : '') + '>查询曲线</button></div>';
-
-    /* 选了具体账号且是平台云端时，才需要列设备（云端按设备查） */
-    if (!allAcc && G.histAcc && hSrc === 'cloud') {
-      s += '<div class="row" style="margin-top:10px"><select id="hDev" style="flex:1">' +
-        (G.devCache[G.histAcc] || []).map(function (d) {
-          return '<option value="' + esc(d.no) + '"' + (d.no === G.histNo ? ' selected' : '') +
-            '>' + esc(d.name) + '</option>';
-        }).join('') + '</select></div>';
-    }
-    s += '</div>';
-  }
+  /* 【v0.28】本地记录：两步出图。
+     原来要「选账号 → 读取设备 → 选设备 → 查询」四步，其中「读取设备」
+     还是走平台接口拉全量设备（耗额度，且线上有的设备本地未必有记录，
+     点进去是张空图）。现在设备列表直接从本地 CSV 里提（histDevs），
+     跨账号一次列全，点一台就出图。
+     账号不单独选了 —— 设备行里带着账号名，搜索框也能按账号搜。 */
+  s += '<div class="card"><h2>选择设备</h2>' +
+    '<button class="pick" id="hPick"><span class="pf' +
+    (hDevLabel ? '' : ' ph') + '">' +
+    esc(hDevLabel || '点击选择设备') + '</span><span class="ar">›</span></button>' +
+    '<div class="muted tiny" style="margin-top:9px">' +
+    (allAcc
+      ? '正在汇总全部设备的记录，变量名会带「设备名·」前缀。'
+      : '列表直接来自本地落盘记录，不发平台请求；可以按站名、编号或账号搜索。') +
+    '</div>' +
+    '<div class="row" style="margin-top:10px">' +
+    '<button class="sm" id="hAll">全部设备汇总</button>' +
+    (hDevLabel ? '<button class="sm" id="hSwap">换一台设备</button>' : '') +
+    '</div></div>';
 
   /* 结果区 */
   s += '<div id="hRes">' + histResultHtml() + '</div>';
@@ -94,9 +69,8 @@ function histResultHtml() {
   if (!vars.length || !r.count) {
     return '<div class="card"><div class="empty">' +
       (hAcc === '' ? '全部账号在所选范围内没有历史数据' : '该设备在所选范围内没有历史数据') +
-      '<br><span class="tiny">' + (hSrc === 'local'
-        ? '本地记录需要先启动「监控」并跑过巡检'
-        : '换个时间范围再试') + '</span></div></div>';
+      '<br><span class="tiny">本地记录需要先启动「监控」并跑过巡检' +
+      '</span></div></div>';
   }
   var keys = Object.keys(r.series || {});
   /* 【v0.33】高亮与曲线共用一个口径（activeCurves），并显式传这次的 series：
@@ -120,7 +94,7 @@ function histResultHtml() {
       : (G.histName || G.histNo || '');
   var s = '<div class="card"><h2>' + esc(title) +
     '<span class="r">' + r.count + ' 个变量 · ' + r.hours + '小时 · ' +
-    (r.source === 'cloud' ? '云端' : '本地') + '</span></h2>';
+    '本地</span></h2>';
 
   if (keys.length > shown.length) {
     s += '<div class="bar w" style="margin-bottom:10px">⚠ 共 ' + keys.length +
@@ -147,20 +121,6 @@ function histResultHtml() {
 
 function bindHist() {
   var m = el('main');
-
-  m.querySelectorAll('[data-src]').forEach(function (n) {
-    n.onclick = function () {
-      hSrc = n.getAttribute('data-src');
-      G.hist = null;
-      hOn = {};
-    hInit = false;
-      /* 切到平台云端时，「全部账号」不可用（云端必须按设备查），自动退回未选 */
-      if (hSrc === 'cloud' && hAcc === '') hAcc = null;
-      V_hist();
-      /* 已经选过设备就顺手重查一次，省得切回来还要再点一遍 */
-      if (hSrc === 'local' && G.histNo) doQuery();
-    };
-  });
 
   m.querySelectorAll('[data-hh]').forEach(function (n) {
     n.onclick = function () {
@@ -192,84 +152,8 @@ function bindHist() {
     doQuery();
   };
 
-  /* 账号选择：用 app 自己的选择器，不用原生 <select>（系统样式割裂） */
-  var pa = el('hAcc');
-  if (pa) pa.onclick = function () {
-    var accs = G.accounts.filter(function (a) { return a.enabled; });
-    if (!accs.length) { toast('没有启用的账号'); return; }
-    /* 平台云端不支持汇总（一次拉几十台会把请求额度打爆，后端也会直接拒），
-       所以那个选项干脆不给 —— 列出来让用户点了再报错是条死路。 */
-    var items = (hSrc === 'cloud' ? [] : [
-      { name: '全部账号', sub: '汇总所有启用账号下所有设备的记录', v: '' }
-    ]).concat(accs.map(function (a) {
-      return { name: a.name, sub: '只看这个账号', v: a.name };
-    }));
-    openBox('选择账号',
-      '<div id="haList">' + items.map(function (x) {
-        var on = (hAcc !== null && hAcc === x.v);
-        return '<div class="item' + (on ? ' on' : '') + '" data-ha="' + esc(x.v) + '">' +
-          '<div class="t">' + esc(x.name) + '</div>' +
-          '<div class="s">' + esc(x.sub) + '</div></div>';
-      }).join('') + '</div>',
-      null);
-    el('haList').querySelectorAll('[data-ha]').forEach(function (n) {
-      n.onclick = function () {
-        hAcc = n.getAttribute('data-ha');
-        /* 换账号等于换范围，清掉上次的设备选择与结果 */
-        G.histAcc = null;
-        G.histNo = null;
-        G.hist = null;
-        hOn = {};
-    hInit = false;
-        closeBox();
-        V_hist();
-        if (hAcc === '') doQuery();     // 全部账号 = 汇总，直接出结果
-      };
-    });
-  };
-
-  var ld = el('hLoad');
-  if (ld) ld.onclick = function () {
-    if (hAcc === null) { toast('先选账号'); return; }
-    ld.disabled = true;
-    ld.textContent = '读取中…';
-    setTimeout(function () {
-      if (hAcc === '') {
-        /* 全部账号：设备列表没意义，直接汇总查询 */
-        ld.disabled = false;
-        ld.textContent = '⬇ 读取设备';
-        if (G.tab !== 'hist') return;
-        G.histAcc = null;
-        G.histNo = null;
-        doQuery();
-        return;
-      }
-      var r = api('devices', { name: hAcc });
-      ld.disabled = false;
-      ld.textContent = '⬇ 读取设备';
-      if (G.tab !== 'hist') return;
-      if (!r.ok) { toast(r.msg || '读取失败'); return; }
-      G.devCache[hAcc] = r.devices || [];
-      G.histAcc = hAcc;
-      if (!G.devCache[hAcc].length) { toast('该账号下没有设备'); return; }
-      if (hSrc === 'cloud') {
-        G.histNo = G.devCache[hAcc][0].no;
-        G.histName = G.devCache[hAcc][0].name;
-        V_hist();
-        doQuery();
-      } else {
-        V_hist();
-        toast('已载入 ' + G.devCache[hAcc].length + ' 台设备，点「查询曲线」选设备');
-      }
-    }, 30);
-  };
-
-  var qb = el('hQuery');
-  if (qb) qb.onclick = function () {
-    if (hAcc === null) { toast('先选账号'); return; }
-    if (hAcc === '') { doQuery(); return; }    // 全部账号：不用选设备
-    pickDevice();
-  };
+  /* 【v0.33 修订六】删「查询曲线」按钮 —— 云端来源移除后，
+     本地模式点中设备即查，不再需要单独的查询确认键。 */
 
   m.querySelectorAll('[data-var]').forEach(function (n) {
     n.onclick = function () {
@@ -334,36 +218,6 @@ function bindHist() {
 }
 
 /* 设备列表项 HTML。抽成函数是为了搜索时能原样重画，不用两套写法。 */
-function pdItemHtml(d, on) {
-  return '<div class="item' + (on ? ' on' : '') + '" data-pd="' + esc(d.no) + '">' +
-    '<div class="t">' + esc(d.name) + '</div>' +
-    '<div class="s mono tiny">' + esc(d.no) + '</div></div>';
-}
-
-/* 弹窗内的设备列表：按关键字过滤。
-   站点一多（截图里几十台）光靠滚动找太慢，所以加搜索框。
-   设备名和编号都能搜，编号单独能排上是因为很多站名带 _DRPC02H200C90III-02-3
-   这种后缀，用户手上往往只有编号。 */
-function pdListHtml(ds, kw, sel) {
-  var list = ds;
-  if (kw) {
-    var q = kw.toLowerCase();
-    list = ds.filter(function (d) {
-      return ((d.name || '') + ' ' + (d.no || '')).toLowerCase().indexOf(q) >= 0;
-    });
-  }
-  if (!list.length) {
-    return '<div class="empty">' + (kw ? '没有匹配「' + esc(kw) + '」的设备' : '没有设备') + '</div>';
-  }
-  return list.map(function (d) {
-    return pdItemHtml(d, d.no === sel);
-  }).join('');
-}
-
-/* 【v0.28】本地设备直选：点一台就出图。
-   列表来自 histDevs（扫本地 CSV），不发平台请求。
-   搜索同时匹配站名、编号、账号 —— 手里只有编号也能搜到，
-   想只看某条线路直接打线路名（账号名）就行。 */
 function hdItemHtml(d, on) {
   return '<div class="item' + (on ? ' on' : '') + '" data-hd="' + esc(d.no) + '" data-ha="' +
     esc(d.acc) + '" data-hn="' + esc(d.name || '') + '">' +
@@ -434,46 +288,6 @@ function pickLocalDevice() {
   paint();
 }
 
-function pickDevice() {
-  if (!hAcc) { toast('「全部账号」不需要选设备，直接查询'); return; }
-  var ds = G.devCache[hAcc] || [];
-  if (!ds.length) { toast('先点「读取设备」'); return; }
-  openBox('选择设备',
-    '<input id="pdKw" placeholder="搜索设备名或编号" autocomplete="off">' +
-    '<div class="tiny muted" id="pdCnt" style="margin:7px 0 9px"></div>' +
-    '<div id="pdList">' + pdListHtml(ds, '', G.histNo) + '</div>' +
-    '<div class="two" style="margin-top:12px"><button data-no>取消</button>' +
-    '<button class="pri" data-ok>查询</button></div>',
-    function () {
-      if (!G.histNo) { toast('没选设备'); return false; }
-      closeBox();
-      doQuery();
-    });
-
-  var kw = '';
-  function paint() {
-    el('pdList').innerHTML = pdListHtml(ds, kw, G.histNo);
-    el('pdCnt').textContent = kw
-      ? ('匹配 ' + el('pdList').querySelectorAll('[data-pd]').length + ' / ' + ds.length + ' 台')
-      : ('共 ' + ds.length + ' 台');
-    el('pdList').querySelectorAll('[data-pd]').forEach(function (n) {
-      n.onclick = function () {
-        G.histNo = n.getAttribute('data-pd');
-        G.histName = n.querySelector('.t').textContent;
-        el('pdList').querySelectorAll('.item').forEach(function (x) { x.className = 'item'; });
-        n.className = 'item on';
-      };
-    });
-  }
-
-  /* oninput 而不是 onchange：边打边筛，不用等失焦 */
-  el('pdKw').oninput = function () {
-    kw = this.value.trim();
-    paint();
-  };
-  paint();
-}
-
 function doQuery() {
   /* 全部账号：acc='' 、no=''，后端跨账号汇总 */
   if (hAcc === null) { toast('先选账号'); return; }
@@ -481,9 +295,11 @@ function doQuery() {
   var box = el('hRes');
   if (box) box.innerHTML = '<div class="card"><div class="empty">查询中…</div></div>';
   setTimeout(function () {
+    /* 【v0.33 修订六】src 参数去掉云端分支 —— 平台历史接口已 404，
+       只剩本地记录一种来源。 */
     var r = api('histGet', {
       acc: hAcc === '' ? '' : G.histAcc, no: hAcc === '' ? '' : G.histNo,
-      hours: hHours, src: hSrc
+      hours: hHours
     });
     /* 查询期间用户可能已经切走，别覆盖当前页 */
     if (G.tab !== 'hist') return;
@@ -529,6 +345,11 @@ function showFiles() {
     }).join('');
   }
 
+  /* 【v0.33 修订六】文件操作区：删除之外补上导入/导出。
+     原来这个弹窗只有删除 —— 数据只能进不能出：换手机、给同事看曲线、
+     留底账全都抓瞎。导入放在没有文件时也显示（空列表恰恰是
+     最想恢复备份的场景），导出沿用删除的勾选语义（勾谁导谁）。 */
+  var impBtn = '<button class="sm" id="hfImp">⬆ 导入文件…</button>';
   openBox('历史数据文件',
     (fs.length
       ? '<input id="hfKw" placeholder="搜索文件名" autocomplete="off">' +
@@ -536,12 +357,41 @@ function showFiles() {
         '<div id="hfL">' + hfListHtml('') + '</div>' +
         '<div class="tiny muted" style="margin-top:8px">勾选要删除的文件，' +
         '删了不可恢复；正在写入的本月文件删了下轮巡检会重新生成。</div>'
-      : '<div class="empty">还没有历史文件<br><span class="tiny">启动监控后会自动落盘</span></div>') +
+      : '<div class="empty">还没有历史文件<br><span class="tiny">启动监控后会自动落盘，' +
+        '也可以从文件导入备份</span></div>') +
+    (fs.length
+      ? '<div class="two" style="margin-top:12px">' + impBtn +
+        '<button class="sm" id="hfExp" disabled>⬇ 导出选中</button></div>'
+      : '<div class="two" style="margin-top:12px">' + impBtn +
+        '<button class="sm" data-no>关闭</button></div>') +
     (fs.length
       ? '<div class="two" style="margin-top:12px"><button data-no>关闭</button>' +
         '<button class="dan" id="hfDel" disabled>🗑 删除选中</button></div>'
-      : '<div class="two" style="margin-top:12px"><button data-no>关闭</button>' +
-        '<button class="pri" data-ok>好</button></div>'));
+      : ''));
+
+  /* 导入的结果是异步的（用户要去文件选择器里挑），原生完成后
+     回调 window.onHistImported。全局挂一次，弹窗重开也不会丢。 */
+  window.onHistImported = function (r) {
+    if (!r) return;
+    if (r.ok) {
+      toast('已导入 ' + (r.name || '') + '（' +
+        ((r.size || 0) / 1024).toFixed(1) + ' KB）');
+      closeBox();
+      showFiles();     // 重新拉列表，新文件立刻可见
+    } else {
+      toast(r.error || '导入失败');
+    }
+  };
+
+  var imp = el('hfImp');
+  if (imp) imp.onclick = function () {
+    if (typeof Android === 'undefined' || !Android.importHist) {
+      toast('当前版本不支持导入，请更新到最新版');
+      return;
+    }
+    Android.importHist();
+    toast('请在文件选择器里挑历史 CSV（表头含「时间/变量」列）');
+  };
 
   if (fs.length) {
     var kw = '';
@@ -552,22 +402,29 @@ function showFiles() {
         ? ('匹配 ' + shown + ' / ' + fs.length + ' 个')
         : ('共 ' + fs.length + ' 个');
       bindCk();
-      refreshDel();
+      refreshActs();
     }
-    /* 「删除选中」按钮：无勾选时置灰，有勾选时显示会释放多少空间 */
+    /* 「删除选中」按钮：无勾选时置灰，有勾选时显示会释放多少空间。
+       导出按钮同一份勾选状态，一起刷新。 */
     function picked() {
       return [].slice.call(el('hfL').querySelectorAll('.hfck:checked'));
     }
-    function refreshDel() {
-      var b = el('hfDel');
-      if (!b) return;
+    function refreshActs() {
       var n = picked().length;
-      b.disabled = !n;
-      b.textContent = n ? ('🗑 删除选中 (' + n + ')') : '🗑 删除选中';
+      var b = el('hfDel');
+      if (b) {
+        b.disabled = !n;
+        b.textContent = n ? ('🗑 删除选中 (' + n + ')') : '🗑 删除选中';
+      }
+      var e = el('hfExp');
+      if (e) {
+        e.disabled = !n;
+        e.textContent = n ? ('⬇ 导出选中 (' + n + ')') : '⬇ 导出选中';
+      }
     }
     function bindCk() {
       el('hfL').querySelectorAll('.hfck').forEach(function (ck) {
-        ck.onchange = refreshDel;
+        ck.onchange = refreshActs;
       });
     }
     el('hfDel').onclick = function () {
@@ -588,6 +445,20 @@ function showFiles() {
             (rr.freed / 1024).toFixed(1) + ' KB');
           closeBox();
         });
+    };
+    /* 导出：把勾选的文件交给系统分享。原生侧会做和删除同一套的
+       名字校验（前缀/.csv/防穿越），这里只负责把名单递过去。
+       传数组顶层 —— Java 侧按 exportImages 的老教训先判顶层是不是数组。 */
+    var exp = el('hfExp');
+    if (exp) exp.onclick = function () {
+      var cks = picked();
+      if (!cks.length) return;
+      if (typeof Android === 'undefined' || !Android.exportHist) {
+        toast('当前版本不支持导出，请更新到最新版');
+        return;
+      }
+      var names = cks.map(function (ck) { return ck.getAttribute('data-fn'); });
+      Android.exportHist(JSON.stringify(names));
     };
     el('hfKw').oninput = function () { kw = this.value.trim(); paint(); };
     paint();

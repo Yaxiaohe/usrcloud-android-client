@@ -131,6 +131,25 @@ public class MainActivity extends Activity {
                 return null;
             }
 
+            /* 【v0.33 修订八】网页里的外链一律交给系统浏览器。
+               WebView 自己跳过去会变成一个没有地址栏的浏览器：用户回不去，
+               也没法复制链接。只拦 http/https，本地 file:///android_asset 不受影响。 */
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                if (url != null && (url.startsWith("http://") || url.startsWith("https://"))) {
+                    try {
+                        Intent it = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                        it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        startActivity(it);
+                        return true;
+                    } catch (Exception e) {
+                        Core.log("[外链] 没有可用浏览器：" + e);
+                        return false;
+                    }
+                }
+                return false;
+            }
+
             /* 【v0.30】页面加载完成后，把「点通知要跳到的目标设备」交给网页。
                时序很关键：loadUrl 是异步的，onCreate 里直接 evaluateJavascript
                网页还没初始化完、window.onOpenTarget 还不存在，注入会静默丢失。
@@ -155,6 +174,12 @@ public class MainActivity extends Activity {
     private WebView webRef = null;
     private boolean hadAllFiles = false;
     private boolean hadNotify = false;
+    /* 【v0.33 修订六】导入历史数据时文件选择器的请求码。
+       和通知跳转的 requestCode（1001）错开，避免 onActivityResult 认错。 */
+    private static final int REQ_IMPORT_HIST = 9101;
+    /* 导入文件大小上限。历史 CSV 正常几十 MB；超过 512MB 八成是选错了文件，
+       直接拒掉，别把用户存储写爆。 */
+    private static final long IMPORT_MAX_BYTES = 512L * 1024 * 1024;
 
     /* 【v0.30】点通知跳转的目标设备。通知点击时带 acc/dev 过来，
        网页加载完成后由 pushOpenTarget() 交给前端，让它切到监控页并
@@ -358,6 +383,64 @@ public class MainActivity extends Activity {
                 }
             });
         }
+
+        /**
+         * 导出历史数据文件。【v0.33 修订六】
+         *
+         * <p>names 是「历史数据文件」弹窗里勾选的文件名清单（JSON 数组，
+         * 容错 {"names":[...]}）。校验、复制、走系统分享，不发平台请求。
+         * 和 exportImages 一样是 void 桥：结果用 toast 告知，不用回传 JSON。
+         */
+        @JavascriptInterface
+        public void exportHist(final String namesJson) {
+            runOnUiThread(() -> {
+                try {
+                    String s = namesJson == null ? "" : namesJson.trim();
+                    if (s.isEmpty()) s = "[]";
+                    JSONArray names;
+                    if (s.startsWith("[")) {
+                        names = new JSONArray(s);
+                    } else {
+                        names = new JSONObject(s).optJSONArray("names");
+                        if (names == null) names = new JSONArray();
+                    }
+                    doExportHist(names);
+                } catch (Exception e) {
+                    Core.log("[导出] 历史文件参数解析失败：" + e);
+                    toast("导出失败：" + e.getMessage());
+                }
+            });
+        }
+
+        /**
+         * 导入历史数据文件。【v0.33 修订六】
+         *
+         * <p>弹出系统文件选择器（SAF），用户选的 CSV 经验证、复制进
+         * 历史数据目录后，通过 window.onHistImported 回调前端刷列表。
+         * 用户取消选择则不回调（没有可报告的结果）。
+         */
+        @JavascriptInterface
+        public void importHist() {
+            runOnUiThread(() -> {
+                try {
+                    Intent it = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                    it.addCategory(Intent.CATEGORY_OPENABLE);
+                    /* 类型给通配符 + EXTRA_MIME_TYPES 点名 CSV：
+                       各家文件管理器给 CSV 报的 MIME 五花八门
+                       （text/csv、text/comma-separated-values、application/octet-stream），
+                       只写一种会把可选文件漏掉；全放开又会什么文件都列。
+                       这个组合是官方文档推荐的做法。 */
+                    it.setType("*/*");
+                    it.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
+                            "text/csv", "text/comma-separated-values",
+                            "application/csv", "text/plain"});
+                    startActivityForResult(it, REQ_IMPORT_HIST);
+                } catch (Throwable t) {
+                    Core.log("[导入] 打不开文件选择器: " + t);
+                    toast("系统不支持文件选择器，无法导入");
+                }
+            });
+        }
     }
 
     private JSONObject dispatch(String method, JSONObject a) throws Exception {
@@ -423,6 +506,25 @@ public class MainActivity extends Activity {
                 JSONObject o = new JSONObject();
                 o.put("ok", true);
                 return o;
+            }
+            case "openUrl": {
+                /* 【v0.33 修订八】「我的 → 关于」里的项目地址入口。
+                   参数来自网页，绝不能直接丢给 Intent —— 只放行 http/https，
+                   否则 javascript: / file: / intent: 这类 scheme 会被系统当命令执行。 */
+                String u = a.optString("url", "").trim();
+                if (!u.startsWith("https://") && !u.startsWith("http://")) {
+                    return fail("只支持 http/https 链接");
+                }
+                runOnUiThread(() -> {
+                    try {
+                        Intent it = new Intent(Intent.ACTION_VIEW, Uri.parse(u));
+                        it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        startActivity(it);
+                    } catch (Exception e) {
+                        toast("没找到可用的浏览器");
+                    }
+                });
+                return okSimple();
             }
             case "batteryOpt": {
                 /* 【v0.20】电池优化白名单。
@@ -1003,16 +1105,14 @@ public class MainActivity extends Activity {
                 String acc = a.optString("acc", "");
                 String no = a.optString("no", "");
                 int hours = a.optInt("hours", 168);
-                String src = a.optString("src", "local");
-                /* 「全部账号」= acc 空。
-                   平台云端必须按具体设备查（一次拉几十台会把请求额度打爆），
-                   所以汇总模式只在本地记录下开放。 */
-                if ("cloud".equals(src) && (acc.isEmpty() || no.isEmpty())) {
-                    return fail("平台云端需先选择具体设备");
-                }
-                JSONObject o = "cloud".equals(src)
-                        ? cloudHistory(acc, no, hours)
-                        : Hist.localHistory(acc, no, hours);
+                /* 【v0.33 修订六】只剩本地记录一种来源。
+                   原「平台云端」走 history.usr.cn:7002 的 historyData 接口，
+                   实测该路径 HTTP 404（平台已下线）；新控制台的多曲线历史接口
+                   （new.cloudapi.usr.cn/usrCloud/datadic/getMultiCurveDataPointHistory）
+                   属于另一套设备体系，本账号设备不在其中（/dev/getDevs 为空），
+                   参数结构也探不明。功能拉不通还留在界面上，只会让用户点了没反应，
+                   所以按用户预案删掉，云端查询整体移除。 */
+                JSONObject o = Hist.localHistory(acc, no, hours);
                 o.put("ok", true);
                 return o;
             }
@@ -1049,94 +1149,6 @@ public class MainActivity extends Activity {
         JSONObject o = new JSONObject();
         o.put("ok", true);
         return o;
-    }
-
-    /** 云端历史：按需拉某台设备的变量定义与历史值。 */
-    private JSONObject cloudHistory(String accName, String no, int hours) {
-        hours = Math.max(1, Math.min(720, hours));
-        JSONObject out = new JSONObject();
-        try {
-            Account acc = null;
-            for (Account x : Core.loadAccounts()) if (x.name.equals(accName)) acc = x;
-            if (acc == null) return out.put("error", "账号不存在");
-            String tok = Core.ensureLogin(acc);
-            int maxVars = 6;
-            JSONObject pts = new JSONObject();
-            pts.put("dataPointType", "");
-            pts.put("dataPointName", "");
-            pts.put("dataPointIdList", new JSONArray());
-            pts.put("slaveId", "");
-            pts.put("cusdeviceNo", no);
-            pts.put("getOperable", 0);
-            pts.put("getTimestampDatas", 1);
-            pts.put("getLocationDatas", 1);
-            pts.put("getStringDatas", 0);
-            pts.put("getBitDatas", 0);
-            pts.put("pageNo", 1);
-            pts.put("pageSize", 500);
-            JSONArray plst = Core.apiPublic(Core.POINTS_URL, pts, tok)
-                    .optJSONObject("data").optJSONArray("cusdeviceDataPointList");
-            if (plst == null) plst = new JSONArray();
-
-            long start = System.currentTimeMillis() - hours * 3600_000L;
-            java.util.LinkedHashMap<String, List<double[]>> series = new java.util.LinkedHashMap<>();
-            JSONArray vars = new JSONArray();
-            int n = Math.min(maxVars, plst.length());
-            for (int i = 0; i < n; i++) {
-                JSONObject pt = plst.getJSONObject(i);
-                String name = pt.optString("name");
-                Object rel = pt.opt("dataPointRelId");
-                if (rel == null) continue;
-                // 历史库按 dataPointId 查询
-                JSONObject hp = new JSONObject();
-                hp.put("dataPoints", new JSONArray().put(new JSONObject()
-                        .put("cusdeviceNo", no)
-                        .put("dataPointId", pt.opt("dataPointId"))));
-                hp.put("startTime", start);
-                hp.put("endTime", System.currentTimeMillis());
-                JSONObject r;
-                try {
-                    r = Core.apiPublic("https://history.usr.cn:7002/history/cusdevice/historyData", hp, tok);
-                } catch (Exception e) {
-                    continue;
-                }
-                JSONArray lst = r.optJSONObject("data") == null ? null
-                        : r.optJSONObject("data").optJSONArray("list");
-                if (lst == null) continue;
-                List<double[]> pts2 = new ArrayList<>();
-                for (int j = 0; j < lst.length(); j++) {
-                    JSONObject o = lst.getJSONObject(j);
-                    long t = o.optLong("time", 0);
-                    Double v = Watch.parseNum(String.valueOf(o.opt("value")));
-                    if (t <= 0 || v == null) continue;
-                    pts2.add(new double[]{t, v});
-                }
-                if (pts2.size() < 2) continue;
-                java.util.Collections.sort(pts2, (x, y) -> Double.compare(x[0], y[0]));
-                series.put(name, pts2);
-                JSONObject meta = new JSONObject();
-                meta.put("name", name);
-                meta.put("unit", pt.optString("unit", ""));
-                vars.put(meta);
-            }
-            out.put("vars", vars);
-            JSONObject ser = new JSONObject();
-            for (Map.Entry<String, List<double[]>> e : series.entrySet()) {
-                JSONArray pa = new JSONArray();
-                for (double[] p : e.getValue()) pa.put(new JSONArray().put((long) p[0]).put(p[1]));
-                ser.put(e.getKey(), pa);
-            }
-            out.put("series", ser);
-            out.put("count", vars.length());
-            out.put("source", "cloud");
-            out.put("hours", hours);
-        } catch (Exception e) {
-            try {
-                out.put("error", String.valueOf(e.getMessage()));
-            } catch (Exception ignored) {
-            }
-        }
-        return out;
     }
 
     private JSONObject accJson(Account a) throws Exception {
@@ -1354,6 +1366,213 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             Core.log("[导出] 失败：" + e);
             toast("导出失败：" + e.getMessage());
+        }
+    }
+
+    /**
+     * 导出历史数据文件。【v0.33 修订六】
+     *
+     * <p>「历史数据文件」弹窗原来只有删除 —— 数据只能进不能出，
+     * 换手机、给同事看曲线、留底账全都抓瞎。这里补上导出：
+     * 校验（复用 Hist.fileByName 的规则，和删除同一套）→ 复制到
+     * cacheDir/export/ → FileProvider 生成 content:// URI → 系统分享。
+     *
+     * <p>为什么不直接分享 histDir 里的源文件：file_paths.xml 里
+     * cache-path 是现成的，分享源文件要么配新的 path 根、要么赌
+     * canonical 比对（v0.09 在那个坑上摔过），复制一份最稳。
+     * CSV 按原文件名分享，接收方拿到的就是能直接打开的文件。
+     */
+    private void doExportHist(JSONArray names) {
+        try {
+            if (names == null || names.length() == 0) {
+                toast("先勾选要导出的文件");
+                return;
+            }
+            File shareDir = new File(getCacheDir(), "export");
+            if (shareDir.exists()) Core.deleteTree(shareDir);
+            if (!shareDir.mkdirs()) {
+                toast("无法准备分享目录：" + shareDir.getAbsolutePath());
+                return;
+            }
+
+            ArrayList<Uri> uris = new ArrayList<>();
+            ArrayList<String> bad = new ArrayList<>();
+            int seq = 0;
+            for (int i = 0; i < names.length(); i++) {
+                String raw = names.optString(i, "");
+                File src = Hist.fileByName(raw);
+                if (src == null) { bad.add(raw); continue; }
+                // 同名设备可能重复（不同账号下），加序号避免互相覆盖
+                File dst = new File(shareDir, String.format("%03d_%s", ++seq, src.getName()));
+                if (!copyFile(src, dst)) { bad.add(src.getName()); continue; }
+                uris.add(FileProvider.getUriForFile(
+                        this, getPackageName() + ".fileprovider", dst));
+            }
+            if (uris.isEmpty()) {
+                toast("没有可导出的文件（名字不合法或文件已不存在）");
+                Core.log("[导出] 历史数据全部失败：" + bad);
+                return;
+            }
+
+            Intent it = new Intent(Intent.ACTION_SEND_MULTIPLE);
+            /* CSV 的 MIME。不用 image/* 那套前缀通配 —— 那是 v0.24
+               为微信多图分享踩出来的特例；数据文件各家都认标准类型。 */
+            it.setType("text/csv");
+            it.putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris);
+            int flags = Intent.FLAG_GRANT_READ_URI_PERMISSION;
+            it.addFlags(flags);
+            /* ClipData 逐个装 URI：Android 7.0+ 靠它把读权限传给接收方，
+               只放第一个的话，微信能读到第 1 个、读不到后面的。 */
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                ClipData cd = ClipData.newRawUri("历史数据", uris.get(0));
+                for (int i = 1; i < uris.size(); i++) {
+                    cd.addItem(new ClipData.Item(uris.get(i)));
+                }
+                it.setClipData(cd);
+            }
+            Intent chooser = Intent.createChooser(it, "导出历史数据（" + uris.size() + " 个）");
+            chooser.addFlags(flags);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                ClipData cd = ClipData.newRawUri("历史数据", uris.get(0));
+                for (int i = 1; i < uris.size(); i++) {
+                    cd.addItem(new ClipData.Item(uris.get(i)));
+                }
+                chooser.setClipData(cd);
+            }
+            startActivity(chooser);
+            Core.log("[导出] 已发起历史数据分享 " + uris.size() + " 个");
+            if (!bad.isEmpty()) {
+                toast("已导出 " + uris.size() + " 个，" + bad.size() + " 个跳过了");
+            }
+        } catch (Exception e) {
+            Core.log("[导出] 历史数据失败：" + e);
+            toast("导出失败：" + e.getMessage());
+        }
+    }
+
+    /**
+     * 文件选择器的结果。【v0.33 修订六】只处理历史数据导入，
+     * 别的请求码原样交给系统。
+     */
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQ_IMPORT_HIST) return;
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) {
+            // 用户取消：没有可报告的结果，记一行日志就够了
+            Core.log("[导入] 用户取消了文件选择");
+            return;
+        }
+        importHistFile(data.getData());
+    }
+
+    /**
+     * 把用户选中的 CSV 导入历史数据目录。【v0.33 修订六】
+     *
+     * <p>三道关，全过了才落盘：
+     * <ol>
+     *   <li><b>大小</b>：超过 512MB 直接拒（正常历史文件几十 MB，
+     *       超大文件八成是选错了，别把用户存储写爆）；</li>
+     *   <li><b>格式</b>：表头必须含「时间」和「变量」两列 ——
+     *       这是本 app 落盘 CSV 的表头（时间,账号,设备名称,设备编号,变量,值）。
+     *       选错文件时给一句明白话，而不是导入一堆乱码行；</li>
+     *   <li><b>落点</b>：Hist.importTarget() 生成带时间戳的新文件名，
+     *       绝不覆盖任何已有文件（导入是添数据，不是替换）。</li>
+     * </ol>
+     *
+     * <p>复制用 Reader/Writer 字符流，不用 byte[] 中转 ——
+     * 中文站名是多字节 UTF-8，按字节切缓冲会把一个汉字劈成两半。
+     */
+    private void importHistFile(Uri uri) {
+        File dst = null;
+        try {
+            /* 第一道：大小。openAssetFileDescriptor 拿长度，拿不到就放过
+              （复制时还有第二道字节数兜底）。 */
+            try {
+                android.content.res.AssetFileDescriptor afd =
+                        getContentResolver().openAssetFileDescriptor(uri, "r");
+                if (afd != null) {
+                    long len = afd.getLength();
+                    afd.close();
+                    if (len > IMPORT_MAX_BYTES) {
+                        histImportBack(failImport("文件太大（超过 512MB），疑似选错"));
+                        return;
+                    }
+                }
+            } catch (Exception ignored) {
+                // 拿不到大小不拦，后面复制时按字节数兜底
+            }
+
+            java.io.BufferedReader br = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(
+                            getContentResolver().openInputStream(uri), "UTF-8"));
+            String header = br.readLine();
+            /* 第二道：格式。表头对不上就明说，别把别人的 CSV 混进历史库 */
+            if (header == null || header.indexOf("时间") < 0 || header.indexOf("变量") < 0) {
+                try { br.close(); } catch (Exception ignored) { }
+                Core.log("[导入] 表头不对: " + header);
+                histImportBack(failImport("文件格式不对：表头应包含「时间」和「变量」列"));
+                return;
+            }
+
+            /* 第三道：落点（带时间戳的新文件，不覆盖） */
+            dst = Hist.importTarget();
+            java.io.OutputStreamWriter w = new java.io.OutputStreamWriter(
+                    new java.io.FileOutputStream(dst), "UTF-8");
+            // 补 BOM + 规范表头：和本地落盘保持一致，Excel 打开不乱码
+            w.write("﻿");
+            w.write(header.trim());
+            w.write("\r\n");
+            char[] buf = new char[8192];
+            long bytes = 0;
+            int n;
+            while ((n = br.read(buf)) > 0) {
+                w.write(buf, 0, n);
+                bytes += n;
+                if (bytes > IMPORT_MAX_BYTES) {
+                    try { br.close(); } catch (Exception ignored) { }
+                    try { w.close(); } catch (Exception ignored) { }
+                    if (dst.exists()) dst.delete();
+                    histImportBack(failImport("文件太大（超过 512MB），已中断"));
+                    return;
+                }
+            }
+            w.flush();
+            w.close();
+            br.close();
+
+            JSONObject ok = new JSONObject();
+            ok.put("ok", true);
+            ok.put("name", dst.getName());
+            ok.put("size", dst.length());
+            Core.log("[导入] 已导入 " + dst.getName() + " (" + dst.length() + " B)");
+            histImportBack(ok);
+        } catch (Exception e) {
+            Core.log("[导入] 失败：" + e);
+            if (dst != null && dst.exists()) dst.delete();   // 别留半个文件
+            histImportBack(failImport(String.valueOf(e.getMessage())));
+        }
+    }
+
+    private JSONObject failImport(String msg) {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("ok", false);
+            o.put("error", msg);
+            return o;
+        } catch (Exception e) {
+            return new JSONObject();
+        }
+    }
+
+    /** 把导入结果回调给前端（window.onHistImported）。页面没就绪时静默跳过。 */
+    private void histImportBack(JSONObject o) {
+        if (webRef == null) return;
+        try {
+            webRef.evaluateJavascript(
+                    "window.onHistImported && window.onHistImported(" + o.toString() + ")",
+                    null);
+        } catch (Throwable ignored) {
         }
     }
 

@@ -227,7 +227,12 @@ function V_me() {
     '<div class="row tiny muted" style="margin-top:7px"><span>说明</span><span class="sp"></span>' +
     '<span>与 Windows 版同一套接口与判定规则</span></div>' +
     '<div class="row tiny muted" style="margin-top:7px"><span>制作</span><span class="sp"></span>' +
-    '<span>by Yang</span></div></div>';
+    '<span>by Yang</span></div>' +
+    /* 【v0.33 修订八】项目地址入口。不用 <a href>：WebView 里直接跳过去
+       会变成一个没有地址栏的浏览器，用户既回不去也没法复制链接，
+       所以交给系统浏览器（走 Android.openUrl 桥）。 */
+    '<div class="row tiny muted" style="margin-top:7px"><span>项目地址</span><span class="sp"></span>' +
+    '<span id="mGh" style="color:#2b62e0">GitHub 主页 ›</span></div></div>';
 
   el('main').innerHTML = s;
   bindMe();
@@ -274,6 +279,14 @@ function opText(v) {
 
 function bindMe() {
   var m = el('main');
+
+  /* 【v0.33 修订八】关于页的 GitHub 入口：交给系统浏览器打开。
+     打不开（没装浏览器 / 被拦）时如实提示，不静默失败。 */
+  var gh = el('mGh');
+  if (gh) gh.onclick = function () {
+    var r = api('openUrl', { url: 'https://github.com/Yaxiaohe/usrcloud-android-client' });
+    if (!r.ok) toast(r.msg || '打不开浏览器');
+  };
 
   var sa = el('stAsk');
   if (sa) sa.onclick = function () {
