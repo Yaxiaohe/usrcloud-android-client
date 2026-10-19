@@ -262,13 +262,11 @@ public class Hist {
      * <p>稳定分组：温度组内部不重排，用户熟悉的相邻关系保持不变。
      */
     static List<String> sortTempFirst(List<String> order) {
-        List<String> tmp = new ArrayList<>();
-        List<String> rest = new ArrayList<>();
-        for (String n : order) {
-            if (isTempVar(n)) tmp.add(n); else rest.add(n);
-        }
-        tmp.addAll(rest);
-        return tmp;
+        /* 【v0.35】不再是「温度类挑出来放前面」，直接交给 ShotOrder：
+         * 用户置顶清单 → 水温（出水/供水 → 进水/回水）→ 其它温度 → 其余。
+         * 和历史页原来的「温度在前」相比多了一层置顶，但**口径仍然是同一个函数**，
+         * 截图、监控、历史三处不会各排各的。 */
+        return ShotOrder.sortNames(order, Core.varOrderPinned());
     }
 
     /** 变量名里是否含温度相关字样。 */
@@ -448,6 +446,14 @@ public class Hist {
                 return b.optString("last", "").compareTo(a.optString("last", ""));
             }
         });
+        /* 【v0.36】置顶站名在这页也生效：先按「最后记录时间倒序」排好，
+         * 再把命中的提到前面（彼此按清单行序）。和监控页同一份清单，
+         * 用户顶上去的站不用在两处各顶一遍。 */
+        list = DevOrder.sortItems(list, new DevOrder.NameOf<JSONObject>() {
+            public String name(JSONObject o) {
+                return o.optString("name", "");
+            }
+        }, Core.devOrderPinned());
         for (JSONObject o : list) arr.put(o);
         return arr;
     }

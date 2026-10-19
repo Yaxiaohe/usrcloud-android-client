@@ -24,6 +24,19 @@ function loadRules() {
   if (r.ok) G.rules = r.rules;
 }
 
+/* 【v0.35】变量置顶清单。读不到就当空表 —— 空表 = 全走默认分档，
+   也就是「出水/供水 → 进水/回水 → …」，不会因为读失败把顺序搞乱。 */
+function loadVarOrder() {
+  var r = api('varOrder', {});
+  if (r.ok) G.vars = r.list || [];
+}
+
+/* 【v0.36】置顶站名清单。同样读不到就当空表 = 保持各处原有顺序。 */
+function loadDevOrder() {
+  var r = api('devOrder', {});
+  if (r.ok) G.devPins = r.list || [];
+}
+
 function boot() {
   /* WebView 有时会重复抛 DOMContentLoaded，重复初始化会把 busy 状态搞乱 */
   if (booted) return;
@@ -49,6 +62,8 @@ function boot() {
   loadHealth();
   loadAccounts();
   loadRules();
+  loadVarOrder();
+  loadDevOrder();
   var s = api('status', { since: 0 });
   if (s.ok) {
     /* 【v0.22 修】这里原来直接 G.seq = s.seq，把游标设成了「后端当前最新」。

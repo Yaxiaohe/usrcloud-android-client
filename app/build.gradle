@@ -1,5 +1,12 @@
 plugins { id 'com.android.application' }
 
+/* 【v0.36 修订五】编译时间戳。
+   版本号一直停在 0.36（用户要求不升），所以每次重新打包出来的 APK 在手机上
+   长得一模一样，说不清装的是哪一版 —— 这轮就吃了这个亏：
+   三个问题报上来，实际看的是上一版的包。
+   这里把打包时刻写进 BuildConfig，关于页显示出来，一眼就能对上。 */
+def buildStamp = new java.text.SimpleDateFormat("MMdd-HHmm").format(new Date())
+
 android {
     namespace 'org.usrcloud.xunjian'
     compileSdk 34
@@ -8,8 +15,13 @@ android {
         applicationId "org.usrcloud.xunjian"
         minSdk 21
         targetSdk 33
-        versionCode 10334
-        versionName "0.34"
+        versionCode 10336
+        versionName "0.36"
+        buildConfigField "String", "BUILD_STAMP", "\"${buildStamp}\""
+    }
+
+    buildFeatures {
+        buildConfig true
     }
 
     signingConfigs {

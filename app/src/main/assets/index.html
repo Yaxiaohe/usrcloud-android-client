@@ -31,6 +31,10 @@ body{font-family:-apple-system,"PingFang SC","Noto Sans SC","Microsoft YaHei",sa
 .tiny{font-size:11.5px}
 .mono{font-family:ui-monospace,Menlo,Consolas,monospace}
 .row{display:flex;align-items:center;gap:10px}
+/* 【v0.36 修订】行内按钮不许被压缩、不许折行。
+   没有这两条时，输入框的 flex-basis 按 placeholder 宽度算，
+   一行放不下就按比例一起缩 —— 按钮被压窄，「＋ 置顶」折成「＋ 置」/「顶」两行。 */
+.row>button{flex:0 0 auto;white-space:nowrap}
 .row.wrap{flex-wrap:wrap}
 .sp{flex:1}
 .sep{height:1px;background:#eef0f4;margin:11px -14px}
@@ -143,9 +147,16 @@ table.tb td{padding:6px 4px;border-top:1px solid #f1f3f7}
   color:#fff;padding:9px 17px;border-radius:19px;font-size:13px;z-index:120;
   max-width:80%;text-align:center;opacity:0;pointer-events:none;transition:opacity .22s}
 #toast.on{opacity:1}
+/* 弹窗开着时提示条贴顶（见 _core.js 的 toast）：不与弹窗底部按钮抢位置 */
+#toast.top{bottom:auto;top:64px}
 .empty{text-align:center;color:#a8b0bd;font-size:13px;padding:34px 10px}
-.fab{position:absolute;right:16px;top:12px;background:#2b62e0;color:#fff;
-  padding:7px 13px;border-radius:17px;font-size:12.5px;cursor:pointer;z-index:5}
+/* 【v0.36 修订三】标题行右端的「＋新增」改成 h2 里的普通 flex 项。
+   它原来是绝对定位（right:16px; top:12px），和标题文字各算各的垂直位置，
+   看着就是「按钮比文字低一截、没对齐」；而且会压住标题右端的计数，
+   得额外留 80px 才不盖住。放进 h2 之后由 align-items:center 兜住，
+   对齐不再靠坐标凑。 */
+.fab{flex:0 0 auto;background:#2b62e0;color:#fff;
+  padding:6px 12px;border-radius:16px;font-size:12.5px;line-height:1.2;cursor:pointer}
 .dv{border-bottom:1px solid #f1f3f7;padding:10px 0}
 .dv:last-child{border-bottom:0}
 .dv .h{display:flex;align-items:center;gap:8px;margin-bottom:5px}
@@ -228,7 +239,7 @@ table.tb td{padding:6px 4px;border-top:1px solid #f1f3f7}
 </head>
 <body>
 <div id="hd">
-  <span class="ver" id="hver">v0.34</span>
+  <span class="ver" id="hver">v0.36</span>
   <h1 id="htitle">有人云巡站</h1>
   <p id="hsub">铁路站点水电巡检 · 一键截图</p>
 </div>

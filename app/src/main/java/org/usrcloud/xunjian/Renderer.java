@@ -121,9 +121,11 @@ public class Renderer {
          * 关键顺序：**先排再截断**。平台返回的顺序是「谁先建的谁在前」，
          * 一台 17 变量的机组前十个位置常被水流量 / 定时使能 / 启动信号占满，
          * 用户最关心的供回水温度会落在 MAX_CARDS 的截断之外 —— 截图里干脆没有。
-         * 排序规则和截断都在 ShotOrder 里（零依赖纯函数，jshotordertest 逐条验算）。 */
+         * 排序规则和截断都在 ShotOrder 里（零依赖纯函数，jshotordertest 逐条验算）。
+         * 【v0.35】再叠一层用户置顶清单：`我的 → 变量排序` 里配的关键词排最前，
+         * 没配就全走默认档，行为与 v0.34 一致。 */
         List<String[]> cards = new ArrayList<>();
-        for (String[] row : ShotOrder.arrange(data.rows, Core.MAX_CARDS)) {
+        for (String[] row : ShotOrder.arrange(data.rows, Core.MAX_CARDS, Core.varOrderPinned())) {
             String name = row[1], tm = row[3], cur = row[4];
             String val, unit;
             Matcher m = NUM_UNIT.matcher(cur == null ? "" : cur);

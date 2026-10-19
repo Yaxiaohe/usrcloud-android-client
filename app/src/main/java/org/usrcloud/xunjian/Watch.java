@@ -1248,7 +1248,13 @@ public class Watch {
         return arr;
     }
 
-    /** 设备列表 JSON：按账号分组。 */
+    /** 设备列表 JSON：按账号分组。
+     *
+     * <p>【v0.36】排序分两步：先按「账号 + 设备名」定默认次序，
+     * 再把「我的 → 置顶站名」命中的提到最前面（命中项之间按清单行序）。
+     * 为什么用两次排序而不是一次写完：置顶清单为空时行为必须和 v0.35 完全一致，
+     * 两步写法的第一步就是原来那段代码，零改动。
+     */
     public static JSONArray statesJson() {
         JSONArray arr = new JSONArray();
         List<DevState> list;
@@ -1259,6 +1265,7 @@ public class Watch {
             int c = x.acc.compareTo(y.acc);
             return c != 0 ? c : String.valueOf(x.name).compareTo(String.valueOf(y.name));
         });
+        list = DevOrder.sortItems(list, s -> String.valueOf(s.name), Core.devOrderPinned());
         for (DevState s : list) {
             try {
                 arr.put(stateJson(s));
@@ -1270,7 +1277,12 @@ public class Watch {
 
     static JSONArray rowsJson(List<String[]> rows) {
         JSONArray a = new JSONArray();
-        for (String[] r : rows) {
+        /* 【v0.35】先把行排一遍再发：监控页点开站点看到的那张实时数据表，
+         * 顺序要和截图、历史页一致（同一台设备三处看到的先后必须相同）。
+         * 排序不截断（max<=0）：监控页是看全量，不像截图只画 10 张。
+         * 注意这里排的是**副本**——st.rows 本身不动，
+         * 别处的「按名字找变量下发新值」还按原数组走。 */
+        for (String[] r : ShotOrder.arrange(rows, 0, Core.varOrderPinned())) {
             try {
                 a.put(new JSONArray()
                         .put(r.length > 1 ? r[1] : "")

@@ -52,6 +52,18 @@ function exportImages() {
   openShotPicker(paths);
 }
 
+/* 从截图路径里取出站名。
+ *
+ * 文件名固定是 <yyyyMMdd>_<HHmmss>_<站名>.png（见 Core 里的 fname 拼接），
+ * 站名本身可能带下划线，所以只剥掉前两段，剩下的整段当站名 ——
+ * 用 split('_')[2] 会在「1_2号机组」这种名字上把站名截断，
+ * 置顶就静默失效了（用户只会看到「顶了没反应」）。 */
+function shotDevName(p) {
+  var nm = String(p || '').split('/').pop().replace(/\.png$/i, '');
+  var m = /^\d{8}_\d{6}_(.+)$/.exec(nm);
+  return m ? m[1] : nm;
+}
+
 /* 批量选择弹窗：勾选后一次导出不超过 9 张
  *
  * 【v0.23 修】原来渲染写成
@@ -66,7 +78,7 @@ function exportImages() {
  * 46 行根本扫不过来。现在只显示批次目录 + 尺寸，完整路径留到选中后汇总。 */
 function openShotPicker(paths) {
   var done = loadExported();
-  var sorted = paths.slice().sort();
+  var sorted = pinSort(paths.slice().sort(), G.devPins, shotDevName);
   var body = '';
   sorted.forEach(function (p, i) {
     var nm = p.split('/').pop();

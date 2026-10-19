@@ -45,6 +45,10 @@ import java.util.Map;
 public class MainActivity extends Activity {
 
     private WebView web;
+    /* 【v0.36 修订】网页是否已经加载完（onPageFinished 之后为 true）。
+       用于判断能不能把提示交给网页的 toast()：加载完之前网页里还没有
+       toast 函数，注入会静默丢失，那种情况要回退系统 Toast。 */
+    private volatile boolean webReady = false;
 
     /* 【v0.25 移除】文件管理器候选清单相关的整套代码：
      * FM_EXTRA_PKGS（已知包名表）、fileManagers()（查可响应 ACTION_VIEW 的应用）、
@@ -157,6 +161,7 @@ public class MainActivity extends Activity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
+                webReady = true;
                 pushOpenTarget();
             }
         });
@@ -347,7 +352,8 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface
         public void toast(final String msg) {
-            runOnUiThread(() -> Toast.makeText(MainActivity.this, msg, Toast.LENGTH_SHORT).show());
+            /* 【v0.36 修订】走同一个出口，别在这里另起一套样式 */
+            MainActivity.this.toast(msg);
         }
 
         @JavascriptInterface
@@ -456,6 +462,7 @@ public class MainActivity extends Activity {
                 JSONObject o = new JSONObject();
                 o.put("ok", true);
                 o.put("version", Core.APP_VERSION);
+                o.put("stamp", Core.BUILD_STAMP);
                 o.put("saveDir", saveDirText());
                 o.put("saveHint", saveDirHint());
                 o.put("workers", Core.WORKERS);
@@ -744,6 +751,123 @@ public class MainActivity extends Activity {
                 }
                 return fail("账号不存在");
             }
+            /* ---------------- 变量排序 / 置顶（v0.35） ----------------
+               三处（监控实时表、截图卡片、历史曲线）共用同一份清单，
+               所以读写都只能走这里，不能让某处自己存一份。 */
+            case "varOrder": {
+                JSONObject o = okSimple();
+                o.put("list", new JSONArray(Core.varOrderPinned()));
+                o.put("path", Core.varOrderPathHint());
+                o.put("text", Core.varOrderRaw());
+                o.put("max", VarOrder.MAX_ITEMS);
+                return o;
+            }
+            case "varOrderSave": {
+                /* 前端是按「列表 + 上下移动」编辑的，直接存有序数组；
+                   行序就是优先级，不另外存权重，少一个能写错的地方。 */
+                JSONArray ja = a.optJSONArray("list");
+                List<String> items = new ArrayList<>();
+                if (ja != null) {
+                    for (int i = 0; i < ja.length(); i++) {
+                        String k = ja.optString(i, "").trim();
+                        if (k.isEmpty()) continue;
+                        String w = VarOrder.warn(k);
+                        if (!w.isEmpty()) return fail("第 " + (i + 1) + " 行：" + w);
+                        items.add(k);
+                    }
+                }
+                if (items.size() > VarOrder.MAX_ITEMS) {
+                    return fail("最多 " + VarOrder.MAX_ITEMS + " 条关键词");
+                }
+                Core.saveVarOrder(items);
+                Core.log("[排序] 置顶关键词已保存 " + items.size() + " 条");
+                JSONObject o = okSimple();
+                o.put("msg", items.isEmpty()
+                        ? "已清空，全部按默认顺序显示" : "已保存 " + items.size() + " 条");
+                o.put("list", new JSONArray(Core.varOrderPinned()));
+                return o;
+            }
+            case "varOrderRawSave": {
+                String err = Core.saveVarOrderRaw(a.optString("text", ""));
+                if (!err.isEmpty()) {
+                    Core.log("[排序] 原文保存被拒绝: " + err);
+                    return fail(err);
+                }
+                /* 回读一次确认真的落盘 —— 写完报成功、实际没写进去最难查 */
+                JSONObject o = okSimple();
+                o.put("msg", "已保存 " + Core.varOrderPinned().size() + " 条");
+                o.put("list", new JSONArray(Core.varOrderPinned()));
+                return o;
+            }
+            case "varOrderReset": {
+                try {
+                    Core.saveVarOrder(new ArrayList<String>());
+                } catch (Exception e) {
+                    return fail("恢复失败: " + e);
+                }
+                Core.log("[排序] 已恢复默认顺序（清空置顶清单）");
+                JSONObject o = okSimple();
+                o.put("msg", "已恢复默认顺序");
+                o.put("list", new JSONArray(Core.varOrderPinned()));
+                return o;
+            }
+            /* ---------------- 站名置顶（v0.36） ----------------
+               与变量置顶完全同构，只是匹配对象换成设备名。
+               三处（监控页设备列表、历史页选设备、截图列表）共用这份清单。 */
+            case "devOrder": {
+                JSONObject o = okSimple();
+                o.put("list", new JSONArray(Core.devOrderPinned()));
+                o.put("path", Core.devOrderPathHint());
+                o.put("text", Core.devOrderRaw());
+                o.put("max", DevOrder.MAX_ITEMS);
+                return o;
+            }
+            case "devOrderSave": {
+                JSONArray ja = a.optJSONArray("list");
+                List<String> items = new ArrayList<>();
+                if (ja != null) {
+                    for (int i = 0; i < ja.length(); i++) {
+                        String k = ja.optString(i, "").trim();
+                        if (k.isEmpty()) continue;
+                        String w = DevOrder.warn(k);
+                        if (!w.isEmpty()) return fail("第 " + (i + 1) + " 行：" + w);
+                        items.add(k);
+                    }
+                }
+                if (items.size() > DevOrder.MAX_ITEMS) {
+                    return fail("最多 " + DevOrder.MAX_ITEMS + " 条关键词");
+                }
+                Core.saveDevOrder(items);
+                Core.log("[排序] 置顶站名已保存 " + items.size() + " 条");
+                JSONObject o = okSimple();
+                o.put("msg", items.isEmpty()
+                        ? "已清空，全部按默认顺序显示" : "已保存 " + items.size() + " 条");
+                o.put("list", new JSONArray(Core.devOrderPinned()));
+                return o;
+            }
+            case "devOrderRawSave": {
+                String err = Core.saveDevOrderRaw(a.optString("text", ""));
+                if (!err.isEmpty()) {
+                    Core.log("[排序] 站名原文保存被拒绝: " + err);
+                    return fail(err);
+                }
+                JSONObject o = okSimple();
+                o.put("msg", "已保存 " + Core.devOrderPinned().size() + " 条");
+                o.put("list", new JSONArray(Core.devOrderPinned()));
+                return o;
+            }
+            case "devOrderReset": {
+                try {
+                    Core.saveDevOrder(new ArrayList<String>());
+                } catch (Exception e) {
+                    return fail("恢复失败: " + e);
+                }
+                Core.log("[排序] 已清空置顶站名");
+                JSONObject o = okSimple();
+                o.put("msg", "已恢复默认顺序");
+                o.put("list", new JSONArray(Core.devOrderPinned()));
+                return o;
+            }
             /* ---------------- 账号表格原文编辑（v0.19） ---------------- */
             case "accountsRaw": {
                 JSONObject o = new JSONObject();
@@ -897,7 +1021,16 @@ public class MainActivity extends Activity {
                         ro.put("error", r.error == null ? JSONObject.NULL : r.error);
                         ro.put("skip", r.skip);
                         JSONArray rep = new JSONArray();
-                        for (Core.ReportItem it : r.report) {
+                        /* 【v0.36 修订】巡站页「N 台·点行看截图」这张表也要跟置顶站名走。
+                           和监控页一样是稳定排序：命中项按清单行序提前，其余保持
+                           平台返回的顺序。这里排的是**副本**，不动 Core.results
+                           里的执行顺序（那是打包/计数的依据，改了会和 zip 里的编号打架）。 */
+                        List<Core.ReportItem> ordered = DevOrder.sortItems(r.report,
+                                new DevOrder.NameOf<Core.ReportItem>() {
+                                    public String name(Core.ReportItem it) { return it.device; }
+                                },
+                                Core.devOrderPinned());
+                        for (Core.ReportItem it : ordered) {
                             JSONObject io = new JSONObject();
                             io.put("device", it.device);
                             io.put("status", it.status);
@@ -939,6 +1072,11 @@ public class MainActivity extends Activity {
                         }
                         devs = kept;
                     }
+                    /* 【v0.36 修订】「选择站点」弹窗里的设备列表也按置顶站名排。
+                       用户勾站点的顺序和监控页看到的一致，不用再在一堆站里找。 */
+                    devs = DevOrder.sortItems(devs, new DevOrder.NameOf<Core.Dev>() {
+                        public String name(Core.Dev d) { return d.name; }
+                    }, Core.devOrderPinned());
                     JSONArray arr = new JSONArray();
                     for (Core.Dev d : devs) {
                         JSONObject o = new JSONObject();
@@ -1252,8 +1390,7 @@ public class MainActivity extends Activity {
                 it2.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                 startActivity(it2);
             } catch (Exception e2) {
-                Toast.makeText(this, "请到 设置→应用→有人云巡站→权限 手动开启",
-                        Toast.LENGTH_LONG).show();
+                toast("请到 设置→应用→有人云巡站→权限 手动开启");
             }
         }
     }
@@ -1631,8 +1768,33 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void toast(String s) {
-        Toast.makeText(this, s, Toast.LENGTH_SHORT).show();
+    /**
+     * 统一提示条出口。
+     *
+     * 【v0.36 修订】原来这里直接 `Toast.makeText`，用的是系统 Toast ——
+     * 圆角气泡 + 左侧应用图标，位置贴着屏幕底部；而网页自己有 `#toast`，
+     * 是细长黑条、浮在页面上方 88px。两者同一屏出现时（比如「我的」页开着
+     * 置顶弹窗、又点「设为后台不受限制」），看起来像两个不同 App 的提示
+     * 叠在一起，用户反馈的就是这个。
+     *
+     * 现在 Java 侧所有提示都转给网页的 toast()，样式只保留一套。
+     * 只有网页还没加载完（onPageFinished 之前，比如启动就报错）才回退系统 Toast ——
+     * 那时候网页里没有 toast 函数，转过去等于把消息吞了。
+     */
+    private void toast(final String s) {
+        runOnUiThread(() -> {
+            if (webReady && web != null) {
+                try {
+                    web.evaluateJavascript(
+                            "if(typeof toast==='function')toast(" + JSONObject.quote(s) + ")",
+                            null);
+                    return;
+                } catch (Exception ignored) {
+                    // 网页那边异常就退回系统 Toast，别让提示彻底消失
+                }
+            }
+            Toast.makeText(MainActivity.this, s, Toast.LENGTH_SHORT).show();
+        });
     }
 
     /* 【v0.23 修问题 1】返回键之前是：

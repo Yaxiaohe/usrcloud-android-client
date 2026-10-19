@@ -44,7 +44,10 @@ public class Core {
        改一处两边同时生效。 */
     public static volatile int STALE_MINUTES = 15;
     public static final int MAX_CARDS = 10;
-    public static final String APP_VERSION = "0.34";
+    public static final String APP_VERSION = "0.36";
+    /* 【v0.36 修订五】打包时刻（build.gradle 注入）。
+       版本号不动，光看 v0.36 分不清装的是哪一次打包的包，这个问题页面上要能看出来。 */
+    public static final String BUILD_STAMP = BuildConfig.BUILD_STAMP;
 
     /** 并发线程数，可在「我的 → 设置」里改，落盘到 设置.json */
     public static volatile int WORKERS = 4;
@@ -168,6 +171,22 @@ public class Core {
     public static void init(Context c) {
         ctx = c.getApplicationContext();
         loadCfg();
+        /* 【v0.36 修订五】升级前留下的私有批次要清掉。
+           修订四之后新跑的轮次不留内部副本了，但以前留下的老批次还在，
+           用户在文件管理器里翻到 /data/…/files/巡站截图 会以为「还在往这写」。
+           只清「对外已经有同一批且那批里真有文件」的，其余一律不动。
+           放后台线程：启动时不能因为扫目录把首屏卡住。 */
+        new Thread(new Runnable() {
+            public void run() {
+                try {
+                    int n = BatchClean.cleanMirrored(batchesDir(),
+                            new File(ShotStore.displayPath()));
+                    if (n > 0) Log.i("patrol", "[清理] 升级前留下的私有批次已清 " + n + " 个");
+                } catch (Exception e) {
+                    Log.w("patrol", "清理旧私有批次失败: " + e);
+                }
+            }
+        }, "clean-old-batches").start();
     }
 
     public static void log(String msg) {
@@ -530,6 +549,148 @@ public class Core {
             return "\"" + s.replace("\"", "\"\"") + "\"";
         }
         return s;
+    }
+
+    // ---------------- 变量排序 / 置顶（varsort.csv，v0.35） ----------------
+
+    private static File varOrderFile() {
+        return new File(rootDir(), "varsort.csv");
+    }
+
+    /**
+     * 置顶关键词的进程内缓存。
+     *
+     * <p>为什么要有缓存：这个列表在**渲染每一台设备的每一张截图**时都要读
+     * （{@link Renderer} 调一次 {@link ShotOrder#arrange}），
+     * 46 个站点一轮下来是几百次；而且 {@code Watch.rowsJson} 每台设备
+     * 也要读一次。每次都开文件既慢又容易撞上正在写的文件。
+     * 保存后把它置 null 让它下次重读，比直接改缓存更不容易漏。
+     */
+    private static List<String> varCache = null;
+
+    /**
+     * 当前生效的置顶关键词（行序 = 优先级，返回只读视图）。
+     *
+     * <p>文件还不存在就是空表 —— 空表意味着**全部走默认档**
+     * （出水/供水 → 进水/回水 → 其它水温 → 其它温度 → 其余），
+     * 所以新装的 app 不用配任何东西，行为就和 v0.35 的默认规则一致。
+     */
+    public static synchronized List<String> varOrderPinned() {
+        if (varCache == null) {
+            List<String> l;
+            try {
+                l = VarOrder.parse(varOrderRaw());
+            } catch (Exception e) {
+                l = new ArrayList<>();
+            }
+            varCache = l;
+        }
+        return java.util.Collections.unmodifiableList(varCache);
+    }
+
+    /** 变量排序表原文（没建过文件时返回「只有表头」的空白表，而不是空串）。 */
+    public static String varOrderRaw() {
+        File f = varOrderFile();
+        if (!f.exists()) return VarOrder.toText(new ArrayList<String>());
+        try {
+            return readFile(f);
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    public static String varOrderPathHint() {
+        return varOrderFile().getAbsolutePath();
+    }
+
+    /** 按列表落盘（界面上「新增 / 上移 / 下移 / 删除」走的都是这条路）。 */
+    public static void saveVarOrder(List<String> items) throws Exception {
+        OutputStreamWriter w = new OutputStreamWriter(
+                new FileOutputStream(varOrderFile()), "UTF-8");
+        w.write(VarOrder.toText(items));
+        w.flush();
+        w.close();
+        varCache = null;
+    }
+
+    /**
+     * 保存原文（用户直接改 CSV 的路子）。
+     *
+     * <p>校验不过就**一个字都不写**：这份表一旦被写坏，
+     * 三处顺序会一起乱，而且用户看不出是这张表的问题。
+     *
+     * @return 空串 = 已保存；否则是拒绝的原因
+     */
+    public static String saveVarOrderRaw(String text) {
+        String err = VarOrder.validate(text);
+        if (!err.isEmpty()) return err;
+        try {
+            List<String> items = VarOrder.parse(text);
+            saveVarOrder(items);
+            return "";
+        } catch (Exception e) {
+            return "写入失败: " + e;
+        }
+    }
+
+    // ---------------- 站名置顶（sitesort.csv，v0.36） ----------------
+    /* 与上面变量排序同一套写法：一个小文件 + 进程内缓存 + 保存后失效。
+       分开两份文件而不是塞进一张表：两类关键词的匹配对象完全不同
+       （变量名 vs 设备名），混在一起会出现「站名关键词把某个变量也顶上去」。 */
+
+    private static File devOrderFile() {
+        return new File(rootDir(), "sitesort.csv");
+    }
+
+    private static List<String> devCache = null;
+
+    /** 当前生效的置顶站名关键词（行序 = 优先级，返回只读视图）。 */
+    public static synchronized List<String> devOrderPinned() {
+        if (devCache == null) {
+            List<String> l;
+            try {
+                l = DevOrder.parse(devOrderRaw());
+            } catch (Exception e) {
+                l = new ArrayList<>();
+            }
+            devCache = l;
+        }
+        return java.util.Collections.unmodifiableList(devCache);
+    }
+
+    public static String devOrderRaw() {
+        File f = devOrderFile();
+        if (!f.exists()) return DevOrder.toText(new ArrayList<String>());
+        try {
+            return readFile(f);
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    public static String devOrderPathHint() {
+        return devOrderFile().getAbsolutePath();
+    }
+
+    public static void saveDevOrder(List<String> items) throws Exception {
+        OutputStreamWriter w = new OutputStreamWriter(
+                new FileOutputStream(devOrderFile()), "UTF-8");
+        w.write(DevOrder.toText(items));
+        w.flush();
+        w.close();
+        devCache = null;
+    }
+
+    /** @return 空串 = 已保存；否则是拒绝的原因（原表一个字不动） */
+    public static String saveDevOrderRaw(String text) {
+        String err = DevOrder.validate(text);
+        if (!err.isEmpty()) return err;
+        try {
+            saveDevOrder(DevOrder.parse(text));
+            return "";
+        } catch (Exception e) {
+            return "写入失败: " + e;
+        }
     }
 
     // ---------------- 账号表格原文编辑（v0.19） ----------------
@@ -1021,6 +1182,10 @@ public class Core {
         final AtomicInteger failCnt = new AtomicInteger(0);
         // 对外发布成功的张数，用来在结束时给用户一句明确交代
         final AtomicInteger pubCnt = new AtomicInteger(0);
+        /* 【v0.36 修订四】已经被成功复制到对外目录的内部文件。
+           对外那份写成功之后，内部副本就是纯占地方（每张图磁盘上躺两份）。
+           worker 是并发的，所以用同步 List 收集，等 zip 打完之后再统一删。 */
+        final List<String> pubPriv = java.util.Collections.synchronizedList(new ArrayList<>());
         final String batchName = batch.getName();
 
         try {
@@ -1115,6 +1280,9 @@ public class Core {
                                         if (pub != null && pubCnt.getAndIncrement() == 0) {
                                             log("[截图] 对外目录：" + ShotStore.displayPath());
                                         }
+                                        /* 记下「这张已经有对外副本」，收尾时删掉内部那份。
+                                           没记下的（pub == null）一律保留 —— 那是唯一的图。 */
+                                        if (pub != null) pubPriv.add(path);
                                     } catch (Exception pe) {
                                         Log.w("patrol", "截图发布异常: " + pe);
                                     }
@@ -1193,21 +1361,55 @@ public class Core {
                 } catch (Exception e) {
                     log("打包失败: " + e.getMessage());
                 }
-                // 清往期批次，只留本次。私有目录和对外目录都要清，
-                // 否则用户文件管理器里的旧批次会一直堆积，磁盘越用越大。
+                /* 【v0.36 修订四】zip 已经打好，内部副本可以删了。
+                   只删「对外确实写成功」的那些：pub == null 的一张不动 ——
+                   那种情况内部这份是唯一的图，删了就真没了。 */
+                int gone = 0;
+                synchronized (pubPriv) {
+                    for (String p : pubPriv) {
+                        try {
+                            if (new File(p).delete()) gone++;
+                        } catch (Exception ignored) {
+                        }
+                    }
+                }
+                /* 删完把空掉的账号目录、空掉的批次目录一并收掉。
+                   有文件的时候 delete() 会返回 false，不会误删。 */
+                int pruned = FilePrune.pruneEmptyDirs(batch);
+                /* 每个账号下面显示的那行路径，改成「用户实际能找到的那个」。
+                   整个账号的图都发布成功 → 显示对外目录；只要有一张没发出去，
+                   就老实显示内部目录（那里才是完整的那份）。 */
+                String pubBase = ShotStore.displayPath();
+                for (AccountResult ar : results.values()) {
+                    if (ar.report.isEmpty()) continue;
+                    boolean allPub = true;
+                    for (ReportItem it : ar.report) {
+                        if (it.pubPath == null) {
+                            allPub = false;
+                            break;
+                        }
+                    }
+                    if (allPub) {
+                        ar.dir = new File(pubBase, batchName + "/" + safeName(ar.name))
+                                .getAbsolutePath();
+                    }
+                }
+                if (gone > 0) log("[截图] 已删内部副本 " + gone + " 张（对外那份保留）");
+                if (pruned > 0) log("[截图] 收掉空目录 " + pruned + " 个");
+
+                /* 【v0.36 修订三】**不再自动清往期**。
+                   原来每轮跑完就把往期批次（私有目录 + 对外目录）一起删掉，
+                   用户看到的现象是「跑完一次，上一次的图就没了」——
+                   「清理往期」这个按钮也就成了摆设，点不点都一样。
+                   现在往期一律保留，清不清、什么时候清由用户点「清理往期」决定。
+                   这里只把「还剩几批」写进日志，方便判断该不该清。 */
                 try {
-                    for (String b : ZipUtil.listBatches()) {
-                        deleteTree(new File(Core.batchesDir(), b));
-                        log("[清理] 已删除往期批次 " + b);
+                    int n = ZipUtil.listBatches().size();
+                    if (n > 0) {
+                        log("[批次] 除本次外还有 " + n + " 个往期批次（要删请点「清理往期」）");
                     }
                 } catch (Exception e) {
-                    log("[清理] 跳过: " + e.getMessage());
-                }
-                try {
-                    int pn = ShotStore.cleanOldBatches(batchName);
-                    if (pn > 0) log("[清理] 对外目录已删 " + pn + " 个往期批次");
-                } catch (Exception e) {
-                    Log.w("patrol", "对外目录清理失败: " + e);
+                    Log.w("patrol", "统计往期批次失败: " + e);
                 }
             }
 
@@ -1218,7 +1420,7 @@ public class Core {
                 log("[截图] 已复制 " + pubCnt.get() + " 张到：" + ShotStore.displayPath());
                 log("       " + ShotStore.displayHint());
             } else {
-                log("[截图] 对外目录写入失败，本次截图仅在应用内，请点巡站页「用文件管理器打开」");
+                log("[截图] 对外目录写入失败，本次截图仅在应用内；要发出去请点巡站页「导出图片」");
             }
         } catch (Throwable e) {
             error = String.valueOf(e.getMessage());

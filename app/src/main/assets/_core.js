@@ -23,6 +23,12 @@ var G = {
   histNo: '',
   histName: '',
   rules: null,
+  /* 【v0.35】变量置顶清单（行序 = 优先级）。监控/截图/历史三处共用，
+     真正的排序在 Java 侧算，这里只是给「我的」页显示摘要用。 */
+  vars: [],
+  /* 【v0.36】置顶站名清单（行序 = 优先级）。监控页设备列表、历史页选设备、
+     截图列表三处共用。同样只做展示摘要，真正的排序在 Java 侧读 sitesort.csv。 */
+  devPins: [],
   devCache: {},      // acc -> [{no,name}]
   busy: false,
   /* 【v0.31 修订】本轮巡站的编号（后端 run/status 都带 run_id）。
@@ -63,12 +69,57 @@ function esc(s) {
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+/* ---------- 置顶排序（v0.36） ----------
+ * 与 Java 侧 PinList.indexOf 同一口径：包含匹配、大小写不敏感、取最靠前的关键词。
+ *
+ * 为什么 JS 侧还要留一份：截图列表是纯前端渲染的（Java 只给文件路径），
+ * 没有经过 DevOrder.sortItems。两处口径必须一致，否则「我的」页写着顶上了、
+ * 截图列表看不到效果 —— 用户会以为是功能坏了。
+ */
+function pinIndexOf(pins, name) {
+  if (!pins || !pins.length) return -1;
+  var s = String(name == null ? '' : name).toLowerCase();
+  if (!s) return -1;
+  for (var i = 0; i < pins.length; i++) {
+    var k = String(pins[i] == null ? '' : pins[i]).trim().toLowerCase();
+    if (!k) continue;
+    if (s.indexOf(k) >= 0) return i;
+  }
+  return -1;
+}
+
+/* 稳定排序：命中的按清单行序在前，其余保持调用方给的原序。
+   显式拿原下标做兜底比较，不依赖 Array.sort 的实现是否稳定。 */
+function pinSort(list, pins, nameOf) {
+  var src = (list || []).slice();
+  if (!pins || !pins.length) return src;
+  var arr = src.map(function (it, i) {
+    return { it: it, i: i, k: pinIndexOf(pins, nameOf ? nameOf(it) : it) };
+  });
+  arr.sort(function (a, b) {
+    if (a.k < 0 && b.k < 0) return a.i - b.i;
+    if (a.k < 0) return 1;
+    if (b.k < 0) return -1;
+    if (a.k !== b.k) return a.k - b.k;
+    return a.i - b.i;
+  });
+  return arr.map(function (x) { return x.it; });
+}
+
 /* ---------- toast ---------- */
 var tTid = null;
 function toast(m) {
   var t = el('toast');
+  if (!t) return;
   t.textContent = m;
-  t.className = 'on';
+  /* 【v0.36 修订】弹窗打开时提示条挪到上方。
+     原来固定 bottom:88px，而弹窗是垂直居中的（最高 86vh），
+     于是提示正好压在弹窗底部的「完成 / 保存」按钮上 ——
+     用户点完按钮看到一条提示盖住刚点的位置，像两个层叠在一起打架。
+     现在有弹窗就贴到顶部，谁也不遮谁。 */
+  var mask = el('mask');
+  var over = !!(mask && mask.className.indexOf('on') >= 0);
+  t.className = over ? 'on top' : 'on';
   if (tTid) clearTimeout(tTid);
   tTid = setTimeout(function () { t.className = ''; }, 2200);
 }

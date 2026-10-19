@@ -48,9 +48,9 @@ function V_me() {
   var s = '';
 
   /* 账号 */
-  s += '<div class="card" style="position:relative">' +
-    '<h2>账号管理<span class="r">' + G.accounts.length + ' 个</span></h2>' +
-    '<div class="fab" id="mAdd">＋ 新增</div>';
+  s += '<div class="card">' +
+    '<h2>账号管理<span class="r">' + G.accounts.length + ' 个</span>' +
+    '<div class="fab" id="mAdd">＋ 新增</div></h2>';
   if (!G.accounts.length) {
     s += '<div class="empty">还没有账号<br><span class="tiny">点右上角「＋ 新增」</span></div>';
   } else {
@@ -102,10 +102,10 @@ function V_me() {
   var onlyChange = !!(G.rules && G.rules.notify_on_change_only);
   var cdMin = (G.rules && G.rules.repeat_cooldown_min != null)
       ? G.rules.repeat_cooldown_min : 60;
-  s += '<div class="card" style="position:relative">' +
+  s += '<div class="card">' +
     '<h2>异常提醒规则<span class="r">' +
-    ((G.rules && G.rules.rules) ? G.rules.rules.length : 0) + ' 条</span></h2>' +
-    '<div class="fab" id="rAdd">＋ 新增</div>';
+    ((G.rules && G.rules.rules) ? G.rules.rules.length : 0) + ' 条</span>' +
+    '<div class="fab" id="rAdd">＋ 新增</div></h2>';
   var rl = (G.rules && G.rules.rules) || [];
   if (!rl.length) {
     s += '<div class="empty">还没有规则<br>' +
@@ -185,6 +185,57 @@ function V_me() {
       '设为后台不受限制</button>') +
     '</div>';
 
+  /* 变量排序（v0.35）
+     用户反馈「同一台机组上进水/出水的位置会自己换」——
+     根子是平台返回的变量顺序不保证稳定，而我们原来同档内保持平台原序，
+     平台一换序截图就跟着换。这里给一份置顶清单：行序 = 优先级，
+     命中的排最前，没命中的走默认分档（出水/供水 → 进水/回水 → …）。
+     三处（监控实时表、截图卡片、历史曲线）共用同一份，排序在 Java 侧算。 */
+  var vl = G.vars || [];
+  s += '<div class="card"><h2>变量排序<span class="r">' +
+    (vl.length ? vl.length + ' 条置顶' : '默认顺序') + '</span></h2>' +
+    '<div class="muted tiny" style="margin-bottom:9px">' +
+    '排在前面的变量，监控、截图、历史三处都按这个顺序显示。</div>';
+  if (vl.length) {
+    s += '<div class="row wrap" style="margin-bottom:10px">' +
+      vl.map(function (k, i) {
+        return '<span class="pill">' + (i + 1) + ' · ' + esc(k) + '</span>';
+      }).join('') + '</div>';
+  } else {
+    s += '<div class="muted tiny" style="margin-bottom:10px;line-height:1.75">' +
+      '还没配，现在按默认顺序：<br>' +
+      '出水/供水 → 进水/回水 → 其它水温 → 其它温度 → 其余</div>';
+  }
+  s += '<button class="blk" id="mVarEdit">↑↓ 编辑置顶顺序</button>' +
+    '<button class="blk" id="mVarRaw" style="margin-top:8px">📋 编辑排序表（CSV 原文）</button>' +
+    '<div class="muted tiny" style="margin-top:7px">' +
+    '关键词按「包含」匹配变量名 —— 平台把「供水温度T1」改成 T2，规则照样命中。</div>' +
+    '</div>';
+
+  /* 置顶站名（v0.36）
+     和上面同构：46 个站点上百台机组，天天盯的就那么几台，
+     排在字母序中间每次都要往下翻。这里顶上去，监控/历史/截图三处一起变。 */
+  var dl = G.devPins || [];
+  s += '<div class="card"><h2>置顶站名<span class="r">' +
+    (dl.length ? dl.length + ' 条置顶' : '默认顺序') + '</span></h2>' +
+    '<div class="muted tiny" style="margin-bottom:9px">' +
+    '排在前面的站，监控页设备列表、历史页选设备、截图列表三处都提到最前。</div>';
+  if (dl.length) {
+    s += '<div class="row wrap" style="margin-bottom:10px">' +
+      dl.map(function (k, i) {
+        return '<span class="pill">' + (i + 1) + ' · ' + esc(k) + '</span>';
+      }).join('') + '</div>';
+  } else {
+    s += '<div class="muted tiny" style="margin-bottom:10px;line-height:1.75">' +
+      '还没配。现在各页按自己的默认顺序：<br>' +
+      '监控页按账号+站名，历史页按最后记录时间，截图按文件名。</div>';
+  }
+  s += '<button class="blk" id="mDevEdit">↑↓ 编辑置顶站名</button>' +
+    '<button class="blk" id="mDevRaw" style="margin-top:8px">📋 编辑站名表（CSV 原文）</button>' +
+    '<div class="muted tiny" style="margin-top:7px">' +
+    '关键词按「包含」匹配站名 —— 填「某线路」这条线上所有站一次顶上去。</div>' +
+    '</div>';
+
   /* 设置 */
   s += '<div class="card"><h2>设置</h2>' +
     '<div class="row" style="margin-bottom:9px"><span style="font-size:13.5px">并发线程数</span>' +
@@ -223,7 +274,11 @@ function V_me() {
   /* 关于 */
   s += '<div class="card"><h2>关于</h2>' +
     '<div class="row tiny muted"><span>应用</span><span class="sp"></span>' +
-    '<span>有人云巡站 v' + esc(h.version || '0.34') + '</span></div>' +
+    '<span>有人云巡站 v' + esc(h.version || '0.36') + '</span></div>' +
+    /* 【v0.36 修订五】版本号一直停在 0.36，光看版本分不清装的是哪一次打包的包。
+       这里把编译时刻摆出来，出问题时对着它一看就知道该不该重装。 */
+    '<div class="row tiny muted" style="margin-top:7px"><span>编译</span><span class="sp"></span>' +
+    '<span id="mStamp">' + esc(h.stamp ? h.stamp : '未知') + '</span></div>' +
     '<div class="row tiny muted" style="margin-top:7px"><span>说明</span><span class="sp"></span>' +
     '<span>与 Windows 版同一套接口与判定规则</span></div>' +
     '<div class="row tiny muted" style="margin-top:7px"><span>制作</span><span class="sp"></span>' +
@@ -299,6 +354,18 @@ function bindMe() {
   /* 【v0.19】账号表格原文编辑 */
   var mr = el('mRaw');
   if (mr) mr.onclick = function () { editRawTable(); };
+
+  /* 【v0.35】变量排序：列表编辑 + 原文编辑 */
+  var mve = el('mVarEdit');
+  if (mve) mve.onclick = function () { editVarOrder(); };
+  var mvr = el('mVarRaw');
+  if (mvr) mvr.onclick = function () { editVarOrderRaw(); };
+
+  /* 【v0.36】置顶站名：同一套编辑器，换一份清单 */
+  var mde = el('mDevEdit');
+  if (mde) mde.onclick = function () { editDevOrder(); };
+  var mdr = el('mDevRaw');
+  if (mdr) mdr.onclick = function () { editDevOrderRaw(); };
 
   /* 【v0.20 新增】恢复出厂预置账号。
      用户反馈「某线路还在程序包里没删掉」—— 查下来是覆盖安装不动私有目录，
@@ -544,6 +611,264 @@ function stationKwTip(v) {
     if (v.indexOf(key) >= 0) return STATION_KW_TIPS[i][1];
   }
   return '';
+}
+
+/* ---------- 置顶清单编辑器（v0.35 变量 / v0.36 站名） ----------
+ *
+ * 两处用的是同一个编辑器：一行一个关键词，↑ ↓ 调先后，✕ 删。
+ * **每次改动立刻落盘**（不设「保存」按钮）：手机上一旦要用户记住
+ * 「改完还得点一下」，十次里有三次会漏点，然后说「配了没用」。
+ * 落盘失败会把列表回滚成服务器上的那一份，界面上不会出现「看着改了其实没改」。
+ *
+ * DOM 用通用 id（pinList / pinKw / pinAdd / pinTip / pinRaw / pinRawSave）：
+ * 弹窗同时只会开一个，两套 id 反而要多维护一倍选择器。
+ */
+var PIN = null;      // 当前正在编辑的清单（cfg + 列表）
+
+function pinWarn(k) {
+  /* 前端只做轻提示，最终把关在 Java（PinList.warn 是同一套口径）：
+     两处都查是为了让用户在点之前就看见问题，不是两套规则。 */
+  if (!k) return '请先输入关键词';
+  if (k.indexOf(',') >= 0) return '关键词里不要带逗号（会被当成两列）';
+  if (k.length > 20) return '关键词太长（' + k.length + ' 字），建议不超过 20 字';
+  return '';
+}
+
+function paintPin() {
+  var box = el('pinList');
+  if (!box || !PIN) return;
+  var cur = PIN.list;
+  if (!cur.length) {
+    box.innerHTML = '<div class="empty" style="padding:10px 0">' +
+      '<span class="tiny">' + esc(PIN.empty || '还没有置顶项 —— 下面输入关键词添加') + '</span></div>';
+    return;
+  }
+  box.innerHTML = cur.map(function (k, i) {
+    return '<div class="row" style="padding:9px 0;border-top:1px solid #f1f3f7">' +
+      '<span class="mono tiny muted" style="width:20px;flex:0 0 20px">' + (i + 1) + '</span>' +
+      '<span style="font-size:14px;flex:1 1 auto;min-width:0;word-break:break-all">' +
+      esc(k) + '</span>' +
+      '<button class="sm" data-pin-up="' + i + '"' + (i === 0 ? ' disabled' : '') + '>↑</button>' +
+      '<button class="sm" data-pin-dn="' + i + '"' +
+      (i === cur.length - 1 ? ' disabled' : '') + '>↓</button>' +
+      '<button class="sm dan" data-pin-rm="' + i + '">✕</button>' +
+      '</div>';
+  }).join('');
+
+  box.querySelectorAll('[data-pin-up]').forEach(function (b) {
+    b.onclick = function () { movePin(parseInt(b.getAttribute('data-pin-up'), 10), -1); };
+  });
+  box.querySelectorAll('[data-pin-dn]').forEach(function (b) {
+    b.onclick = function () { movePin(parseInt(b.getAttribute('data-pin-dn'), 10), 1); };
+  });
+  box.querySelectorAll('[data-pin-rm]').forEach(function (b) {
+    b.onclick = function () {
+      PIN.list.splice(parseInt(b.getAttribute('data-pin-rm'), 10), 1);
+      savePin();
+    };
+  });
+}
+
+function movePin(i, d) {
+  if (!PIN) return;
+  var j = i + d;
+  if (j < 0 || j >= PIN.list.length) return;
+  var t = PIN.list[i];
+  PIN.list[i] = PIN.list[j];
+  PIN.list[j] = t;
+  savePin();
+}
+
+function savePin() {
+  if (!PIN) return;
+  var r = api(PIN.saveApi, { list: PIN.list });
+  if (r.ok) {
+    PIN.list = (r.list || []).slice();
+    var tip = el('pinTip');
+    if (tip) tip.innerHTML = '<span style="color:#128a3a">' + esc(okOf(r)) + '</span>';
+    paintPin();
+    if (PIN.onSaved) PIN.onSaved(PIN.list.slice());
+  } else {
+    /* 写明「已回滚到保存前的样子」，别让用户以为改成了 */
+    toast(okOf(r, '保存失败'));
+    var g = api(PIN.getApi, {});
+    if (g.ok) {
+      PIN.list = (g.list || []).slice();
+      if (PIN.onSaved) PIN.onSaved(PIN.list.slice());
+    }
+    paintPin();
+  }
+}
+
+function addPin() {
+  if (!PIN) return;
+  var inp = el('pinKw');
+  var tip = el('pinTip');
+  if (!inp) return;
+  var k = (inp.value || '').trim();
+  var w = pinWarn(k);
+  if (w) {
+    if (tip) tip.innerHTML = '<span style="color:#d33d3d">' + esc(w) + '</span>';
+    return;
+  }
+  for (var i = 0; i < PIN.list.length; i++) {
+    if (PIN.list[i] === k) {
+      if (tip) tip.innerHTML = '<span style="color:#d98a00">「' + esc(k) + '」已经在列表里了</span>';
+      return;
+    }
+  }
+  if (PIN.list.length >= 60) {
+    if (tip) tip.textContent = '最多 60 条';
+    return;
+  }
+  PIN.list.push(k);
+  inp.value = '';
+  if (tip) tip.textContent = '';
+  savePin();
+}
+
+/**
+ * cfg: { title, hint, placeholder, empty, list, getApi, saveApi,
+ *        path, text, rawApi, rawTitle, onSaved }
+ */
+function openPinEditor(cfg) {
+  PIN = cfg;
+  PIN.list = (cfg.list || []).slice();
+
+  openBox(cfg.title,
+    '<div class="muted tiny" style="margin-bottom:10px;line-height:1.75">' + cfg.hint + '</div>' +
+    '<div id="pinList"></div>' +
+    '<div class="row" style="margin-top:12px">' +
+    /* 【v0.36 修订】输入框的 flex-basis 给 0：让它只吃剩余宽度，
+       不再按 placeholder 的文字长度参与分配。配合 index.html 的
+       .row>button{flex:0 0 auto}，按钮才不会被压成两行。 */
+    '<input id="pinKw" placeholder="' + esc(cfg.placeholder || '关键词') + '" ' +
+    'style="flex:1 1 0;min-width:0;padding:0 10px;height:36px">' +
+    '<button class="sm pri" id="pinAdd" style="height:36px">＋ 置顶</button>' +
+    '</div>' +
+    '<div id="pinTip" class="muted tiny" style="margin-top:8px"></div>' +
+    '<div class="two" style="margin-top:14px"><button class="pri" data-ok>完成</button></div>',
+    /* 「完成」只是关窗：改动在 ↑↓✕ 那一刻就落盘了。
+       这里必须给 onOk（哪怕直接返回 true），否则 openBox 不会绑 data-ok，
+       按钮会变成一个按下去没反应的死键。 */
+    function () { return true; },
+    function () {
+      el('pinAdd').onclick = function () { addPin(); };
+      el('pinKw').onkeydown = function (e) {
+        if (e.key === 'Enter' || e.keyCode === 13) addPin();
+      };
+      paintPin();
+    });
+}
+
+function openPinRaw(cfg) {
+  openBox(cfg.rawTitle,
+    '<div class="muted tiny" style="margin-bottom:9px;line-height:1.7">' +
+    '一行一个关键词，越上面优先级越高。<br>' +
+    '位置：<span class="mono" style="word-break:break-all">' +
+    esc(cfg.path || '') + '</span></div>' +
+    '<textarea id="pinRaw" style="width:100%;height:200px;font-size:12px;' +
+    'line-height:1.6;font-family:ui-monospace,Menlo,Consolas,monospace;' +
+    'border:1px solid #dde1e8;border-radius:8px;padding:8px">' +
+    esc(cfg.text || '') + '</textarea>' +
+    '<div id="pinRawTip" class="muted tiny" style="margin-top:8px"></div>' +
+    '<div class="two" style="margin-top:14px">' +
+    '<button data-no>取消</button><button class="pri" id="pinRawSave">保存</button></div>',
+    null,
+    function () {
+      var tip = el('pinRawTip');
+      function check() {
+        var v = el('pinRaw').value;
+        var lines = v.split('\n').filter(function (x) {
+          return x.trim() && x.trim().charAt(0) !== '#';
+        });
+        var head = lines.length && lines[0].split(',')[0].trim() === cfg.header ? 1 : 0;
+        var n = lines.length - head;
+        if (!n) {
+          tip.innerHTML = '<span style="color:#d33d3d">没有关键词，保存会失败（原表不动）</span>';
+        } else {
+          tip.textContent = '共 ' + n + ' 条（表头行不计数）';
+        }
+      }
+      el('pinRaw').oninput = check;
+      check();
+
+      el('mbox').querySelector('[data-no]').onclick = closeBox;
+      var sv = el('pinRawSave');
+      sv.onclick = function () {
+        sv.disabled = true;
+        sv.textContent = '保存中…';
+        var res = api(cfg.rawApi, { text: el('pinRaw').value });
+        sv.disabled = false;
+        sv.textContent = '保存';
+        if (!res.ok) {
+          tip.innerHTML = '<span style="color:#d33d3d">' + esc(res.msg || '保存失败') +
+            '（原表没动）</span>';
+          return;
+        }
+        if (cfg.onSaved) cfg.onSaved((res.list || []).slice());
+        toast(okOf(res));
+        closeBox();
+        if (G.tab === 'me') V_me();
+      };
+    });
+}
+
+/* 变量排序（v0.35） */
+function editVarOrder() {
+  var r = api('varOrder', {});
+  if (!r.ok) { toast('读取变量排序失败'); return; }
+  openPinEditor({
+    title: '变量排序（置顶）',
+    hint: '排在上面的是置顶变量，行序就是显示顺序。没置顶的按默认排：' +
+      '出水/供水 → 进水/回水 → 其它水温 → 其它温度 → 其余。<br>' +
+      '改动即时生效，监控、截图、历史三处一起变。',
+    placeholder: '关键词，如 出水温度',
+    empty: '还没有置顶项 —— 下面输入关键词添加',
+    list: r.list,
+    getApi: 'varOrder',
+    saveApi: 'varOrderSave',
+    onSaved: function (l) { G.vars = l; if (G.tab === 'me') V_me(); }
+  });
+}
+
+function editVarOrderRaw() {
+  var r = api('varOrder', {});
+  if (!r.ok) { toast('读取排序表失败'); return; }
+  openPinRaw({
+    rawTitle: '变量排序表（CSV 原文）',
+    header: '关键词',
+    path: r.path, text: r.text, rawApi: 'varOrderRawSave',
+    onSaved: function (l) { G.vars = l; }
+  });
+}
+
+/* 置顶站名（v0.36） */
+function editDevOrder() {
+  var r = api('devOrder', {});
+  if (!r.ok) { toast('读取置顶站名失败'); return; }
+  openPinEditor({
+    title: '置顶站名',
+    hint: '排在上面的站点在设备列表和截图列表里都排最前，其余保持原来的顺序。<br>' +
+      '关键词按「包含」匹配设备名，写「某线路」就能把这条线上的站一起顶上去。',
+    placeholder: '关键词，如 站点C西',
+    empty: '还没有置顶站点 —— 下面输入站名关键词',
+    list: r.list,
+    getApi: 'devOrder',
+    saveApi: 'devOrderSave',
+    onSaved: function (l) { G.devPins = l; if (G.tab === 'me') V_me(); }
+  });
+}
+
+function editDevOrderRaw() {
+  var r = api('devOrder', {});
+  if (!r.ok) { toast('读取站名表失败'); return; }
+  openPinRaw({
+    rawTitle: '置顶站名表（CSV 原文）',
+    header: '站名关键词',
+    path: r.path, text: r.text, rawApi: 'devOrderRawSave',
+    onSaved: function (l) { G.devPins = l; }
+  });
 }
 
 function editRawTable() {
