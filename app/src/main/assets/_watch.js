@@ -118,7 +118,7 @@ function softWatch() {
   var tg = el('wToggle');
   if (tg) {
     tg.className = m.enabled ? 'dan' : 'ok';
-    tg.textContent = m.enabled ? '⏹ 停止监控' : '▶ 启动监控';
+    tg.textContent = m.enabled ? '■ 停止监控' : '▶ 启动监控';
   }
   var sc2 = el('wScan');
   if (sc2) {
@@ -153,15 +153,92 @@ function softWatch() {
      所以换完必须重新绑定 bindDevRows()，否则设备行点不动。
 
      标题里的台数也必须一起刷 —— v0.13 之前只刷列表不刷标题，
-     于是标题一直卡在首次进页面时的「0 台」而列表里明明有数据。 */
-  var box = el('devList');
-  if (box) {
-    box.innerHTML = devListBody();
-    bindDevRows();
-  }
+     于是标题一直卡在首次进页面时的「0 台」而列表里明明有数据。
+
+     【v0.36 修订六】这里改成 patchDevList()：成员没变就只改变化的文字，
+     不再每 3 秒把上万个节点推倒重来（见函数上方注释）。 */
+  patchDevList();
   var cnt = el('dvCnt');
   if (cnt) cnt.textContent = filteredDevs().length + ' 台';
   startAgeTicker();
+}
+
+/* 设备列表的「身份指纹」：账号+设备号，按当前显示顺序拼起来。
+   只是数值变了（状态、数据时间）指纹不变 → 走就地更新；
+   巡检新增/减少设备、状态筛选改变成员 → 指纹变 → 重建。 */
+function devSig() {
+  var list = filteredDevs(), s = [];
+  for (var i = 0; i < list.length; i++) s.push((list[i].acc || '') + '\u0001' + list[i].no);
+  return s.join('\u0002');
+}
+
+/* 【v0.36 修订六】后台轮询不再整块重建设备列表。
+ *
+ * 原来每 3 秒 box.innerHTML = devListBody()：94 台设备一次就是上千个节点
+ * 拆掉重来，展开状态、滚动位置全靠事后补，还会让页面周期性发顿。
+ * 现在先比指纹：
+ *   · 成员或顺序变了 → 重建（这种时候确实得重建）；
+ *   · 没变 → 只改会变的那几处：站名、状态胶囊、多久之前、数据时间。
+ * 屏幕上真正变了几个字就动几个节点，其余一个都不碰。 */
+function patchDevList() {
+  var box = el('devList');
+  if (!box) return;
+  var sig = devSig();
+  if (box._sig !== sig) {
+    box.innerHTML = devListBody();
+    box._sig = sig;
+    bindDevRows();
+    return;
+  }
+  var wrap = box.firstElementChild;
+  if (!wrap || !wrap.children) return;
+  var list = filteredDevs(), rows = wrap.children;
+  for (var i = 0; i < list.length && i < rows.length; i++) {
+    var d = list[i], row = rows[i];
+    /* 展开态以 openDev 为唯一依据：就地更新这条路上也要把它对齐。
+       不清这一下，就会出现「openDev 已经清空、行还张着」这种半截状态 ——
+       下一次点行头变成「收起」，用户以为点了没反应。 */
+    var wantOpen = !!openDev[d.no];
+    if (wantOpen !== row.classList.contains('open')) {
+      if (wantOpen) openDevRow(row); else closeDevRow(row);
+    }
+    /* 展开着的行如果还没填（比如点开那一刻快照里恰巧没有这台设备，
+       下一轮才补上来），这里顺手补一次。fillVars 自己幂等，不重复填。 */
+    if (openDev[d.no]) fillVars(row);
+    var nm = row.querySelector('.h .nm');
+    if (nm && nm.textContent !== String(d.name == null ? '' : d.name)) {
+      nm.textContent = d.name || '';
+    }
+    var pill = row.querySelector('.h .pill');
+    if (pill && pill.textContent !== stText(d.status)) {
+      var tmp = document.createElement('span');
+      tmp.innerHTML = stPill(d.status);
+      if (tmp.firstChild) pill.parentNode.replaceChild(tmp.firstChild, pill);
+    }
+    var ag = row.querySelector('.h [data-age-t]');
+    var at = ageTextOf(d.data_time);
+    if (ag && at !== null) {
+      if (ag.getAttribute('data-age-t') !== String(d.data_time)) {
+        ag.setAttribute('data-age-t', String(d.data_time));
+      }
+      if (ag.textContent !== at) ag.textContent = at;
+    }
+    var msg = row.querySelector('[data-dvrfmsg]');
+    if (msg && d.data_time && d.data_time !== '--') {
+      var tx = '数据时间 ' + String(d.data_time).replace('T', ' ').slice(5, 16);
+      if (msg.textContent !== tx) msg.textContent = tx;
+    }
+  }
+}
+
+/* 重建设备列表并记下指纹。凡是「整块换掉 #devList」的地方都走这里，
+   否则 _sig 会跟实际内容对不上，下一次轮询会白重建一遍。 */
+function renderDevListNow() {
+  var box = el('devList');
+  if (!box) return;
+  box.innerHTML = devListBody();
+  box._sig = devSig();
+  bindDevRows();
 }
 
 /* 当前要显示的设备：先按统计条状态筛，再按搜索框关键词筛。
@@ -273,6 +350,86 @@ function startAgeTicker() {
   }, 30000);
 }
 
+/* 按 设备号(+账号) 从当前快照里取一台设备。
+   【v0.36 修订六】懒渲染需要「先有设备对象才画表」，所以抽成一个函数。 */
+function devByKey(no, acc) {
+  var dv = (G.ws && G.ws.devices) || [];
+  for (var i = 0; i < dv.length; i++) {
+    if (dv[i].no !== no) continue;
+    if (acc && dv[i].acc && dv[i].acc !== acc) continue;
+    return dv[i];
+  }
+  return null;
+}
+
+/* 展开区内容：数据时间 + 「刷新这台」+ 变量表。
+   【v0.36 修订六】从 devListBody 里摘出来，只给**展开的**那台渲染。
+   94 台 × 每台十几个变量 = 一千多行表格；折叠时这些行 CSS 里是 display:none，
+   不会画到屏幕上，但 HTML 照样要拼、DOM 照样要建、每次刷新照样要扔 ——
+   切回监控页那一卡主要就卡在这里。折叠态现在只留一个空 .vars 占位。 */
+function varsBody(d) {
+  return '<div class="row" style="margin:2px 0 6px">' +
+    /* 【v0.32】「刷新这台」从展开区左下挪到右上：展开后第一眼就看到，
+       不用穿过整张变量表滚到底才找得到。数据时间留在按钮左边同排。
+       按钮带 data-dvrf 由事件委托处理，避免每轮重建 innerHTML 后 onclick 丢绑。 */
+    '<span class="tiny muted" data-dvrfmsg="' + esc(d.no) + '">' +
+    (d.data_time && d.data_time !== '--' ? '数据时间 ' + esc(String(d.data_time).replace('T', ' ').slice(5, 16)) : '') +
+    '</span><span class="sp"></span>' +
+    '<button class="sm" data-dvrf="' + esc(d.no) + '" data-dvacc="' + esc(d.acc) + '">' +
+    '⟳ 刷新这台</button></div>' +
+    rowsTable(d.rows, d);
+}
+
+/* 点开某台设备时才把它的变量表填进去。
+   同一次展开里只填一次（重复调用不重建），收起时会清空，
+   下次展开按当时的最新快照重新画 —— 见 clearVars 的说明。 */
+function fillVars(row) {
+  if (!row) return;
+  var v = row.querySelector('.vars');
+  if (!v || v.getAttribute('data-filled') === '1') return;
+  var d = devByKey(row.getAttribute('data-dvno'), row.getAttribute('data-dvacc'));
+  if (!d) return;
+  v.innerHTML = varsBody(d);
+  v.setAttribute('data-filled', '1');
+}
+
+/* 收起时把展开区清空。
+   【v0.36 修订六】懒渲染之后，折叠期间的轮询只改表头几个字，碰不到展开区；
+   如果收起时留着旧表格，过几分钟再展开看到的就是「上一次展开那一刻」的旧值，
+   而同一行的表头已经是新时间 —— 两处自相矛盾。
+   清空是很便宜的（本来就没画），下次展开按当时的最新快照重新填一份。 */
+function clearVars(row) {
+  if (!row) return;
+  var v = row.querySelector('.vars');
+  if (!v) return;
+  v.innerHTML = '';
+  v.removeAttribute('data-filled');
+}
+
+/* 展开某台设备的行 —— 点行、点提醒条目、通知跳转三条路都走这一个函数。
+   【v0.36 修订六】变量表改成懒渲染后，「加 open 类」和「填表」必须成对做，
+   少一处就会出现「行是展开了、里面一片空白」，所以不允许各处自己 classList.add。 */
+function openDevRow(row) {
+  if (!row) return;
+  var no = row.getAttribute('data-dvno');
+  row.classList.add('open');
+  if (no) openDev[no] = true;
+  fillVars(row);
+  var ar = row.querySelector('.h .ar');
+  if (ar) ar.textContent = '⌃';
+}
+
+/* 收起某台设备的行：去掉 open 类、清掉展开区内容（见 clearVars 注释）。 */
+function closeDevRow(row) {
+  if (!row) return;
+  row.classList.remove('open');
+  var no = row.getAttribute('data-dvno');
+  if (no) delete openDev[no];
+  clearVars(row);
+  var ar = row.querySelector('.h .ar');
+  if (ar) ar.textContent = '⌄';
+}
+
 function devListBody() {
   var dv = (G.ws && G.ws.devices) || [];
   if (!dv.length) {
@@ -295,26 +452,19 @@ function devListBody() {
        能解析 data_time 就挂 data-age-t，交给 tickAges 定时刷新；
        解析不了才退回后端 age_text —— 老快照里可能没有 data_time。 */
     var at = ageTextOf(d.data_time);
-    return '<div class="dv' + open + '" data-dvno="' + esc(d.no) + '">' +
+    return '<div class="dv' + open + '" data-dvno="' + esc(d.no) +
+      '" data-dvacc="' + esc(d.acc) + '">' +
       '<div class="h"><span class="nm">' + esc(d.name) + '</span>' +
       stPill(d.status) +
       '<span class="tiny muted"' +
       (at === null ? '' : ' data-age-t="' + esc(d.data_time) + '"') + '>' +
       esc(at === null ? (d.age_text || '') : at) + '</span>' +
-      '<span class="ar">⌄</span></div>' +
+      '<span class="ar">' + (open ? '⌃' : '⌄') + '</span></div>' +
       '<div class="tiny muted">' + esc(d.acc) + '</div>' +
-      '<div class="vars">' +
-      /* 【v0.32】「刷新这台」从展开区左下挪到右上：展开后第一眼就看到，
-         不用穿过整张变量表滚到底才找得到。数据时间留在按钮左边同排。
-         按钮带 data-dvrf 由事件委托处理，避免每轮重建 innerHTML 后 onclick 丢绑。 */
-      '<div class="row" style="margin:2px 0 6px">' +
-      '<span class="tiny muted" data-dvrfmsg="' + esc(d.no) + '">' +
-      (d.data_time && d.data_time !== '--' ? '数据时间 ' + esc(String(d.data_time).replace('T', ' ').slice(5, 16)) : '') +
-      '</span><span class="sp"></span>' +
-      '<button class="sm" data-dvrf="' + esc(d.no) + '" data-dvacc="' + esc(d.acc) + '">' +
-      '⟳ 刷新这台</button></div>' +
-      rowsTable(d.rows, d) +
-      '</div></div>';
+      /* 【v0.36 修订六】折叠态不渲染变量表，只留空壳（见 varsBody 注释）。
+         展开的（openDev 里记着的）仍然一次画全，重绘后不用再补。 */
+      '<div class="vars">' + (open ? varsBody(d) : '') + '</div>' +
+      '</div>';
   }).join('') + '</div>';
 }
 
@@ -354,10 +504,7 @@ function buildDevList() {
    用户正在看的东西会闪，所以筛选变化走这条轻量路径。 */
 function repaintDevList() {
   var box = el('devList');
-  if (box) {
-    box.innerHTML = devListBody();
-    bindDevRows();
-  }
+  if (box) renderDevListNow();
   var cnt = el('dvCnt');
   if (cnt) cnt.textContent = filteredDevs().length + ' 台';
   var ttl = el('dvTitle');
@@ -400,7 +547,7 @@ function renderWatch() {
 
   s += '<div class="two" style="margin-top:12px">' +
     '<button class="' + (m.enabled ? 'dan' : 'ok') + '" id="wToggle">' +
-    (m.enabled ? '⏹ 停止监控' : '▶ 启动监控') + '</button>' +
+    (m.enabled ? '■ 停止监控' : '▶ 启动监控') + '</button>' +
     '<button id="wScan"' + (m.scanning ? ' disabled' : '') + '>' +
     (m.scanning ? '巡检中…' : '⟳ 立即巡检') + '</button></div>';
   /* 【v0.29】扫描进度：正在巡检时显示「已巡检 X / Y 台」，让「点了没反应」的
@@ -497,6 +644,10 @@ function renderWatch() {
   s += buildDevList();
 
   el('main').innerHTML = s;
+  /* 列表是刚整块画出来的，把指纹记上：否则 3 秒后第一轮 softWatch
+     会以为「成员变了」又白白重建一次。 */
+  var dvBox = el('devList');
+  if (dvBox) dvBox._sig = devSig();
   bindWatch();
 }
 
@@ -617,13 +768,10 @@ function bindWatch() {
         toast('该设备不在当前列表里（可能被筛选条件挡掉了）');
         return;
       }
-      if (!row.classList.contains('open')) {
-        row.classList.add('open');
-        openDev[hit] = true;
-        var ar = row.querySelector('.ar');
-        if (ar) ar.textContent = '⌃';
-      }
-      scrollTo_(row, row.offsetTop - 8);
+    if (!row.classList.contains('open')) {
+      openDevRow(row);
+    }
+    scrollTo_(row, row.offsetTop - 8);
     };
   });
 
@@ -816,9 +964,9 @@ function bindDevRows() {
     var no = row.getAttribute('data-dvno');
     if (!no) return;
     var on = row.classList.toggle('open');
-    if (on) openDev[no] = true; else delete openDev[no];
-    var ar = h.querySelector('.ar');
-    if (ar) ar.textContent = on ? '⌃' : '⌄';
+    /* 【v0.36 修订六】展开/收起都走统一入口：open 类、openDev、展开区内容
+       三样必须一起变，否则会出现「张着但空白」或「收起还留着旧表」。 */
+    if (on) openDevRow(row); else closeDevRow(row);
   });
 }
 
@@ -966,8 +1114,7 @@ function refreshOneDev(no, acc, btn) {
      把后端还没更新的旧快照覆盖回来，刚刷到的新值当场被冲掉。
      统计条本地的数字用重算的方式同步，不再打后端。 */
   openDev[no] = true;
-  var box = el('devList');
-  if (box) { box.innerHTML = devListBody(); bindDevRows(); }
+  renderDevListNow();
   var cnt = el('dvCnt');
   if (cnt) cnt.textContent = filteredDevs().length + ' 台';
   refreshStatBar();
@@ -1184,10 +1331,7 @@ window.onOpenTarget = function (t) {
   setTimeout(function () {
     var row = el('main') && el('main').querySelector('[data-dvno="' + cssEsc(d.no) + '"]');
     if (row) {
-      if (!row.classList.contains('open')) {
-        row.classList.add('open');
-        var ar = row.querySelector('.ar'); if (ar) ar.textContent = '⌃';
-      }
+      openDevRow(row);
       if (typeof scrollTo_ === 'function') scrollTo_(row, row.offsetTop - 8);
       /* 自动拉一次这台的最新数据 */
       var btn = row.querySelector('[data-dvrf]');

@@ -263,7 +263,7 @@ var allOn = accs.length > 0 && accs.every(function (a) { return G.picked[a.name]
   s += '<div class="card">' +
     '<button class="big" id="btnRun">▶　开始巡站截图</button>' +
     '<div class="two" style="margin-top:10px">' +
-    '<button id="btnPause">⏸　暂停</button>' +
+    '<button id="btnPause">‖　暂停</button>' +
     '<button id="btnExport">⬆　导出图片</button></div>' +
     '<div class="two" style="margin-top:10px">' +
     '<button class="sm" id="btnDevs">选择站点</button>' +

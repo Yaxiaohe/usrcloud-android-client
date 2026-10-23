@@ -264,7 +264,11 @@ function goNoHist(k) {
   el('main').scrollTop = 0;
   stopPoll();
   if (k === 'log') startPoll(900);
-  if (k === 'watch') { render(); startPoll(3000); }
+  /* 【v0.36 修订六】监控页的定时器不再「立刻补一拍」。
+     上面 render() 已经拉过一份 watchState、整页也画完了；
+     startPoll 里再 tick 一次 = 同一份数据再拉一遍 + 列表再推倒重建一遍。
+     94 台设备时，这一下就是切页卡顿里最贵的一段（详见 _watch.js 的 patchDevList）。 */
+  if (k === 'watch') startPoll(3000, true);
 }
 
 function render() {
@@ -299,10 +303,13 @@ window.onNativeBack = function () {
 
 /* ---------- 轮询 ---------- */
 var pTid = null;
-function startPoll(ms) {
+/* skipTick=true：只装定时器，不当场跑一拍。
+   进页面时调用方通常刚拉完数据（V_watch → pollWatch），
+   再补一拍就是重复请求 + 重复渲染。 */
+function startPoll(ms, skipTick) {
   stopPoll();
   pTid = setInterval(tick, ms);
-  tick();
+  if (!skipTick) tick();
 }
 function stopPoll() {
   if (pTid) { clearInterval(pTid); pTid = null; }

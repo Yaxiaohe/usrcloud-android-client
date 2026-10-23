@@ -44,7 +44,7 @@ public class Core {
        改一处两边同时生效。 */
     public static volatile int STALE_MINUTES = 15;
     public static final int MAX_CARDS = 10;
-    public static final String APP_VERSION = "0.36";
+    public static final String APP_VERSION = "0.37";
     /* 【v0.36 修订五】打包时刻（build.gradle 注入）。
        版本号不动，光看 v0.36 分不清装的是哪一次打包的包，这个问题页面上要能看出来。 */
     public static final String BUILD_STAMP = BuildConfig.BUILD_STAMP;
@@ -430,6 +430,10 @@ public class Core {
     }
 
     /** 当前私有目录里那份账号表是不是已经比预置的旧（用于界面提示）。 */
+    /** 当前私有目录里那份账号表是不是已经比预置的旧（用于界面提示）。
+     *  本包不带任何预置账号（assets/accounts.csv 只有表头），
+     *  所有账号都由用户自己添加，不存在「预置表里已删除、手机上还留着」的情况，
+     *  因此恒为 false。 */
     /** 当前私有目录里那份账号表是不是已经比预置的旧（用于界面提示）。
      *  本包不带任何预置账号（assets/accounts.csv 只有表头），
      *  所有账号都由用户自己添加，不存在「预置表里已删除、手机上还留着」的情况，
