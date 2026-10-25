@@ -1129,12 +1129,18 @@ public class MainActivity extends Activity {
                 return okSimple();
             }
             /* 【v0.30】刷新单台设备的实时数据（监控页点开站点后就地拉一次）。
-               不跑整轮巡检，快进快出；返回更新后的那一行设备状态。 */
+               不跑整轮巡检，快进快出；返回更新后的那一行设备状态。
+
+               【v0.38】这里**不能再同步跑网络**。
+               桥接是同步的：不返回，JS 线程就占着，页面一帧都画不出来。
+               弱网下这条链要串 3~4 个请求、每个连接/读取各 30 秒，
+               用户点一下就会冻住一两分钟 —— 报上来的「卡死」就是这个。
+               现在只起后台线程立刻返回，结果由 watchDevRefreshPoll 轮询取走。 */
             case "watchDevRefresh": {
-                JSONObject o = new JSONObject();
-                o.put("ok", true);
-                o.put("device", Watch.refreshDevice(a.optString("acc"), a.optString("no")));
-                return o;
+                return Watch.refreshDeviceStart(a.optString("acc"), a.optString("no"));
+            }
+            case "watchDevRefreshPoll": {
+                return Watch.refreshDevicePoll(a.optString("acc"), a.optString("no"));
             }
             /* 【v0.32】复制文本到系统剪贴板（监控页长按站名）。
                WebView 里 navigator.clipboard 在 file:// 下基本是残废，

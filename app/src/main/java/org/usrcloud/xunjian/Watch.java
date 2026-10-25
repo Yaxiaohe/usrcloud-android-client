@@ -179,6 +179,36 @@ public class Watch {
             Executors.newSingleThreadScheduledExecutor();
     private static ScheduledFuture<?> handle;
 
+    /* 【v0.38】单台刷新的异步通道。
+     *
+     * 为什么必须异步：前端 api() 走的是 Android.call —— **同步**调用，
+     * Java 不返回，JS 线程就一直被占着，页面一帧都画不出来。
+     * 而弱网下 apiJson 的连接/读取超时各 30 秒，一条刷新链要串
+     * 登录 + 元信息 + 变量点 + 最新值（最多 4 个请求），最坏两分钟。
+     * 实测（黑洞端口，read 超时 30s）：单个请求阻塞 30.07 秒；
+     * 让 Android.call 同步卡 3 秒，页面在这 3 秒内帧数 = 0，
+     * 第一帧落在阻塞结束的那一刻 —— 连「刷新中…」都来不及画。
+     * 用户看到的就是「点一下，整个界面冻住」，只能杀进程。
+     *
+     * 现在桥接只负责起个头立刻返回，网络活丢给后台线程，
+     * 前端每 400ms 轮询一次结果（只读内存，几个毫秒）。
+     */
+    private static final java.util.concurrent.ExecutorService REFRESH_POOL =
+            Executors.newFixedThreadPool(2, r -> {
+                Thread t = new Thread(r, "dev-refresh");
+                t.setDaemon(true);
+                return t;
+            });
+    /** key = 账号|设备号 → 跑完的结果（成功或失败） */
+    private static final Map<String, JSONObject> refreshDone =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    /** 正在跑的 key：同一台重复点击不重复起线程 */
+    private static final java.util.Set<String> refreshRunning =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+    /** 起跑时刻：用来清掉没人来取的旧结果，免得 Map 越涨越大 */
+    private static final Map<String, Long> refreshAt =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
     /** 【v0.33 修订八】调度代次。setEnabled(true)/setInterval 重建调度时 +1，
      *  正在跑的那一拍收尾时发现代次变了就不再续命 —— 否则「停→开」瞬间
      *  如果正有一轮在跑，会出现两条调度链，巡检翻倍跑。 */
@@ -480,6 +510,99 @@ public class Watch {
                 scanProgress = null;
             }
         }).start();
+    }
+
+    /**
+     * 【v0.38】起一个后台刷新，**立即返回**。前端随后调 refreshDevicePoll 取结果。
+     *
+     * <p>返回值固定是 {ok:true, running:true}（起不来才是 ok:false + msg）。
+     * 真正的成败在轮询里给 —— 这里绝不能等网络，否则又回到「同步卡死」。
+     */
+    public static JSONObject refreshDeviceStart(String accName, String devNo) throws Exception {
+        JSONObject o = new JSONObject();
+        if (accName == null || accName.isEmpty()) {
+            o.put("ok", false); o.put("msg", "缺少账号"); return o;
+        }
+        if (devNo == null || devNo.isEmpty()) {
+            o.put("ok", false); o.put("msg", "缺少设备编号"); return o;
+        }
+        final String key = accName + "|" + devNo;
+        /* 同一台已经在跑：不重复起线程，让前端接着轮询同一个 key */
+        if (refreshRunning.contains(key)) {
+            o.put("ok", true); o.put("running", true);
+            return o;
+        }
+        refreshRunning.add(key);
+        refreshDone.remove(key);
+        long now = System.currentTimeMillis();
+        refreshAt.put(key, now);
+        /* 顺手清掉 10 分钟前没人来取的旧结果 */
+        for (Map.Entry<String, Long> e : refreshAt.entrySet()) {
+            if (now - e.getValue() > 10 * 60 * 1000L && !refreshRunning.contains(e.getKey())) {
+                refreshAt.remove(e.getKey());
+                refreshDone.remove(e.getKey());
+            }
+        }
+        REFRESH_POOL.execute(() -> {
+            JSONObject r = new JSONObject();
+            try {
+                r.put("ok", true);
+                r.put("device", refreshDevice(accName, devNo));
+            } catch (Throwable t) {
+                r = new JSONObject();
+                try {
+                    r.put("ok", false);
+                    r.put("msg", netMsg(t));
+                } catch (Exception ignored) {
+                }
+                Core.log("[监控] 单台刷新失败 " + key + ": " + t);
+            } finally {
+                refreshDone.put(key, r);
+                refreshRunning.remove(key);
+            }
+        });
+        o.put("ok", true);
+        o.put("running", true);
+        return o;
+    }
+
+    /**
+     * 【v0.38】取单台刷新的结果。
+     *
+     * <p>还在跑 → {ok:true, running:true}；
+     * 跑完了 → 后台那次给的原样结果（成功带 device，失败带 msg）。
+     * 结果**取一次就删**，否则下一次刷新会先读到上一轮的旧数据。
+     */
+    public static JSONObject refreshDevicePoll(String accName, String devNo) throws Exception {
+        String key = (accName == null ? "" : accName) + "|" + (devNo == null ? "" : devNo);
+        JSONObject r = refreshDone.remove(key);
+        if (r != null) return r;
+        JSONObject o = new JSONObject();
+        o.put("ok", true);
+        o.put("running", refreshRunning.contains(key));
+        return o;
+    }
+
+    /**
+     * 【v0.38】把网络异常翻成人话。
+     *
+     * <p>超时和连不上必须分开说：前者是「有信号但很慢」，后者是「根本没通」，
+     * 用户该做的事不一样（等一下 vs 换个地方）。一律「刷新失败」等于没说。
+     */
+    private static String netMsg(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            String n = c.getClass().getSimpleName();
+            if ("SocketTimeoutException".equals(n)) {
+                return "网络太慢，读取超时（信号弱时常见，换个地方再试）";
+            }
+            if ("UnknownHostException".equals(n)) return "域名解析不了，检查网络";
+            if ("ConnectException".equals(n)) return "连不上平台服务器，检查网络";
+            if ("SSLException".equals(n) || "SSLHandshakeException".equals(n)) {
+                return "安全连接没建立起来（网络可能被代理/劫持）";
+            }
+        }
+        String m = t.getMessage();
+        return m == null || m.isEmpty() ? "刷新失败" : m;
     }
 
     /**

@@ -224,7 +224,9 @@ function patchDevList() {
       if (ag.textContent !== at) ag.textContent = at;
     }
     var msg = row.querySelector('[data-dvrfmsg]');
-    if (msg && d.data_time && d.data_time !== '--') {
+    /* 【v0.38】正在刷新时不抢这一格：那行字是「已等 N 秒」或超时原因，
+       被「数据时间」冲掉的话用户根本看不到发生了什么。 */
+    if (msg && !REFRESHING[rfk(d.no, d.acc)] && d.data_time && d.data_time !== '--') {
       var tx = '数据时间 ' + String(d.data_time).replace('T', ' ').slice(5, 16);
       if (msg.textContent !== tx) msg.textContent = tx;
     }
@@ -367,16 +369,32 @@ function devByKey(no, acc) {
    94 台 × 每台十几个变量 = 一千多行表格；折叠时这些行 CSS 里是 display:none，
    不会画到屏幕上，但 HTML 照样要拼、DOM 照样要建、每次刷新照样要扔 ——
    切回监控页那一卡主要就卡在这里。折叠态现在只留一个空 .vars 占位。 */
+/* 【v0.38】正在后台刷新的设备：key = 设备号|账号。
+   为什么要单独存一份状态：软刷新每 3 秒会把那一格重写成「数据时间 …」，
+   不认这个状态的话，「正在读取…已等 N 秒」和超时原因会被当场冲掉 ——
+   用户刚看到「网络太慢」，字还没读完就变回去了，等于没说。
+   渲染（varsBody）和就地刷新（patchDevList）都认它。 */
+var REFRESHING = {};
+function rfk(no, acc) { return String(no) + '|' + String(acc || ''); }
+
 function varsBody(d) {
+  var rf = REFRESHING[rfk(d.no, d.acc)];
+  var msgTxt;
+  if (rf) {
+    msgTxt = '正在读取…已等 ' + Math.max(1, Math.round((Date.now() - rf.t0) / 1000)) + ' 秒';
+  } else {
+    msgTxt = (d.data_time && d.data_time !== '--')
+      ? '数据时间 ' + String(d.data_time).replace('T', ' ').slice(5, 16) : '';
+  }
   return '<div class="row" style="margin:2px 0 6px">' +
     /* 【v0.32】「刷新这台」从展开区左下挪到右上：展开后第一眼就看到，
        不用穿过整张变量表滚到底才找得到。数据时间留在按钮左边同排。
        按钮带 data-dvrf 由事件委托处理，避免每轮重建 innerHTML 后 onclick 丢绑。 */
-    '<span class="tiny muted" data-dvrfmsg="' + esc(d.no) + '">' +
-    (d.data_time && d.data_time !== '--' ? '数据时间 ' + esc(String(d.data_time).replace('T', ' ').slice(5, 16)) : '') +
+    '<span class="tiny muted" data-dvrfmsg="' + esc(d.no) + '">' + esc(msgTxt) +
     '</span><span class="sp"></span>' +
-    '<button class="sm" data-dvrf="' + esc(d.no) + '" data-dvacc="' + esc(d.acc) + '">' +
-    '⟳ 刷新这台</button></div>' +
+    '<button class="sm" data-dvrf="' + esc(d.no) + '" data-dvacc="' + esc(d.acc) + '"' +
+    (rf ? ' disabled' : '') + '>' +
+    (rf ? '刷新中…' : '⟳ 刷新这台') + '</button></div>' +
     rowsTable(d.rows, d);
 }
 
@@ -1040,14 +1058,18 @@ function refreshOneVar(no, acc, varName, btn) {
   if (!no || !varName) return;
   var old = btn ? btn.textContent : '';
   if (btn) { btn.disabled = true; btn.textContent = '…'; }
-  var r = api('watchDevRefresh', { no: no, acc: acc });
-  if (btn) { btn.disabled = false; btn.textContent = old || '⟳'; }
-  if (!r || !r.ok || !r.device) {
-    toast((r && (r.msg || r.error)) || '刷新失败，请稍后再试');
-    return;
-  }
+  /* 【v0.38】这个按钮原来也是同步拉网，弱网下一样把整页冻住，改走后台 */
+  fetchDevAsync(no, acc, null, function (dev, err) {
+    if (btn) { btn.disabled = false; btn.textContent = old || '⟳'; }
+    if (!dev) { toast(err); return; }
+    applyVarRefreshed(no, dev, varName, btn);
+  });
+}
+
+/** 单个变量刷新成功后落地：只改这一行的值和数据时间，不动整卡。 */
+function applyVarRefreshed(no, device, varName, btn) {
   var hit = null;
-  var rows = r.device.rows || [];
+  var rows = device.rows || [];
   for (var i = 0; i < rows.length; i++) {
     if (String(rows[i][0]) === varName) { hit = rows[i]; break; }
   }
@@ -1058,8 +1080,8 @@ function refreshOneVar(no, acc, varName, btn) {
   /* 写回内存：下次整页/软刷新重绘时不会跳回旧值 */
   var dv = (G.ws && G.ws.devices) || [];
   for (var j = 0; j < dv.length; j++) {
-    if (dv[j].no === r.device.no && (dv[j].acc || '') === (r.device.acc || '')) {
-      dv[j] = r.device; break;
+    if (dv[j].no === device.no && (dv[j].acc || '') === (device.acc || '')) {
+      dv[j] = device; break;
     }
   }
   /* 就地更新 DOM：值 + 时间。textContent 赋值自带转义，不用 esc。 */
@@ -1071,8 +1093,8 @@ function refreshOneVar(no, acc, varName, btn) {
     if (tm) tm.textContent = String(hit[2] || '-').replace('T', ' ').slice(5, 16);
   }
   var msg = document.querySelector('[data-dvrfmsg="' + cssEsc(no) + '"]');
-  if (msg && r.device.data_time && r.device.data_time !== '--') {
-    msg.textContent = '数据时间 ' + String(r.device.data_time).replace('T', ' ').slice(5, 16);
+  if (msg && device.data_time && device.data_time !== '--') {
+    msg.textContent = '数据时间 ' + String(device.data_time).replace('T', ' ').slice(5, 16);
   }
   toast('已刷新「' + varName + '」');
 }
@@ -1084,31 +1106,107 @@ function refreshOneVar(no, acc, varName, btn) {
  * 之前展开只能看到上一轮巡检的快照，想拿最新值得等整轮巡检（一轮几十台）。
  * 这里只拉这一台，快进快出；成功后把返回的最新状态写进 G.ws.devices 对应项，
  * 并就地重绘该行（不整页 renderWatch，避免闪烁和打断用户浏览位置）。
+ *
+ * 【v0.38】改成「后台跑 + 轮询」，因为同步调用会冻住整个页面。
+ * 原来这里就是一行同步 api：Java 不返回，JS 线程一直被占着。
+ * 弱网下这条链要串登录 + 元信息 + 变量点 + 最新值（最多 4 个请求），
+ * 每个请求连接/读取各 30 秒 —— 实测单请求阻塞 30.07 秒，
+ * 让 Android.call 同步卡 3 秒时页面帧数为 0，连刚写下的「刷新中…」
+ * 都来不及画出来。用户看到的就是「点一下，界面直接卡死」。
+ * 现在桥接立刻返回，这里每 400ms 问一次结果。
  */
-function refreshOneDev(no, acc, btn) {
-  if (!no) return;
-  var old = btn ? btn.textContent : '';
-  if (btn) { btn.disabled = true; btn.textContent = '刷新中…'; }
-  /* 提示文案区（按钮右侧那格）先标在查 */
-  var msg = document.querySelector('[data-dvrfmsg="' + cssEsc(no) + '"]');
-  if (msg) msg.textContent = '正在读取…';
+var REFRESH_POLL_MS = 400;
+/* 等这么久还没结果就先松手，不能让「刷新中…」一直挂着。
+   后台线程还在跑，结果会写进快照，下次进来能看到。 */
+var REFRESH_GIVEUP_MS = 30000;
 
+/**
+ * 后台刷新一台设备，结果用回调交回 —— 全程不占 JS 线程。
+ *
+ * <p>这是 v0.38 的核心：桥接那头只起线程立刻返回，这头每 400ms 问一次，
+ * 界面始终能画、能点。任何「点一下就拉网」的新功能都该走这里，
+ * 别再直接 api('watchDevRefresh')。
+ *
+ * @param onTick 还在跑的时候调，参数是「已经等了几秒」，调用方用来更新文案
+ * @param cb     (dev, errMsg)：成功 dev 非空；失败 dev 为 null、errMsg 是给用户看的话
+ */
+function fetchDevAsync(no, acc, onTick, cb) {
+  var t0 = Date.now();
+  var tid = null;
   var r = api('watchDevRefresh', { no: no, acc: acc });
-  if (btn) { btn.disabled = false; btn.textContent = old || '⟳ 刷新这台'; }
-  if (!r.ok || !r.device) {
-    if (msg) msg.textContent = '读取失败';
-    toast(r.msg || '刷新失败，请稍后再试');
+  if (!r || !r.ok) {
+    cb(null, (r && r.msg) || '刷新失败，请稍后再试');
     return;
   }
+  tid = setInterval(function () {
+    var p;
+    try { p = api('watchDevRefreshPoll', { no: no, acc: acc }); }
+    catch (e) { p = { ok: false, msg: '调用失败: ' + e }; }
+
+    if (p.running) {
+      var sec = Math.max(1, Math.round((Date.now() - t0) / 1000));
+      if (onTick) onTick(sec);
+      if (Date.now() - t0 > REFRESH_GIVEUP_MS) {
+        clearInterval(tid);
+        cb(null, '网络太慢，这次没读到（已等 ' + sec + ' 秒）');
+      }
+      return;
+    }
+    clearInterval(tid);
+    if (!p.ok || !p.device) {
+      cb(null, p.msg || '刷新失败，请稍后再试');
+      return;
+    }
+    cb(p.device, null);
+  }, REFRESH_POLL_MS);
+}
+
+function refreshOneDev(no, acc, btn) {
+  if (!no) return;
+  var key = rfk(no, acc);
+  if (REFRESHING[key]) return;          /* 同一台正在刷：连点不叠加 */
+  REFRESHING[key] = { t0: Date.now() };
+  var old = btn ? btn.textContent : '';
+  /* 每次现查，不缓存节点：等待期间列表可能被重绘，缓存住就会改到旧节点上，
+     新节点上的字停在「正在读取…」，看起来像卡住了。 */
+  function curBtn() { return document.querySelector('[data-dvrf="' + cssEsc(no) + '"]'); }
+  function curMsg() { return document.querySelector('[data-dvrfmsg="' + cssEsc(no) + '"]'); }
+
+  var b0 = curBtn(), m0 = curMsg();
+  if (b0) { b0.disabled = true; b0.textContent = '刷新中…'; }
+  if (m0) m0.textContent = '正在读取…';
+
+  fetchDevAsync(no, acc, function (sec) {
+    /* 把「已经等了几秒」说出来 —— 弱网下用户才知道它没死 */
+    var m = curMsg();
+    if (m) m.textContent = '正在读取…已等 ' + sec + ' 秒';
+  }, function (dev, err) {
+    delete REFRESHING[key];
+    var b = curBtn();
+    if (b) { b.disabled = false; b.textContent = old || '⟳ 刷新这台'; }
+    if (!dev) {
+      /* 失败原因写在按钮旁边那一格：弱网下「网络太慢」比「读取失败」有用得多 */
+      var m = curMsg();
+      if (m) m.textContent = err || '读取失败';
+      toast(err);
+      return;
+    }
+    applyRefreshedDev(dev, no);
+  });
+}
+
+/** 刷新成功后就地落地：写回内存、重绘这一行、更新统计条。 */
+function applyRefreshedDev(dev, no) {
+  if (!dev) return;
   /* 把最新设备状态写回内存列表：按 账号+编号 精确匹配那一项 */
   var dv = (G.ws && G.ws.devices) || [];
   var hit = false;
   for (var i = 0; i < dv.length; i++) {
-    if (dv[i].no === r.device.no && (dv[i].acc || '') === (r.device.acc || '')) {
-      dv[i] = r.device; hit = true; break;
+    if (dv[i].no === dev.no && (dv[i].acc || '') === (dev.acc || '')) {
+      dv[i] = dev; hit = true; break;
     }
   }
-  if (!hit) dv.push(r.device);
+  if (!hit) dv.push(dev);
   /* 保持这一行展开（重绘后由 openDev 还原）。
      这里只重绘设备列表，**不调 softWatch()** —— softWatch 会重新拉整份 watchState，
      把后端还没更新的旧快照覆盖回来，刚刷到的新值当场被冲掉。
@@ -1118,7 +1216,7 @@ function refreshOneDev(no, acc, btn) {
   var cnt = el('dvCnt');
   if (cnt) cnt.textContent = filteredDevs().length + ' 台';
   refreshStatBar();
-  toast('已刷新「' + (r.device.name || no) + '」');
+  toast('已刷新「' + (dev.name || no) + '」');
 }
 
 /** 用当前内存里的设备列表重算统计条数字（不打后端），保持与设备列表一致。 */
