@@ -246,7 +246,8 @@ function V_me() {
       return '<div class="s' + ((h.workers || 4) === n ? ' on' : '') + '" data-wk="' + n +
         '">' + n + '</div>';
     }).join('') + '</div>' +
-    '<div class="muted tiny" style="margin-top:9px">线程越多越快，但可能触发平台限速，建议 4。</div>' +
+    '<div class="muted tiny" style="margin-top:9px">只影响读变量名和出图的速度；' +
+    '取最新值已按账号合并成一次请求，不受这里影响。建议 4。</div>' +
     '<div class="sep"></div>' +
     /* 【v0.26】陈旧判定阈值从只读改成可调，样式对齐并发线程数的分段选择 */
     '<div class="row" style="margin-bottom:9px"><span style="font-size:13.5px">陈旧判定阈值</span>' +

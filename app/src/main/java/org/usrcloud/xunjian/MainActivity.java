@@ -945,6 +945,18 @@ public class MainActivity extends Activity {
                 }
                 return o;
             }
+            case "reshootStart": {
+                /* 【v0.38c】截图弹窗里「重新获取这张」：只跑这一台。
+                   只起线程、立刻返回，前端每 600ms 轮询 reshootPoll ——
+                   同步等网络会把界面冻住（v0.37 的教训）。 */
+                String msg = Core.reshootStart(a.optString("acc"), a.optString("no"));
+                if (msg != null) return fail(msg);
+                JSONObject o = new JSONObject();
+                o.put("ok", true);
+                return o;
+            }
+            case "reshootPoll":
+                return Core.reshootPoll(a.optString("acc"), a.optString("no"));
             case "run": {
                 if (Core.running) {
                     /* 【v0.31 修订】真的有任务在跑时，别只丢回一句「已有任务在运行」——
@@ -962,9 +974,14 @@ public class MainActivity extends Activity {
                 List<String> names = new ArrayList<>();
                 JSONArray arr = a.optJSONArray("names");
                 if (arr != null) for (int i = 0; i < arr.length(); i++) names.add(arr.getString(i));
-                Core.startPatrol(names);
+                /* 【v0.38b】only_empty = 只跑上一轮没取到数值的站点。
+                   没得跑时 startPatrol 会返回一句原因，原话交给前端显示。 */
+                boolean onlyEmpty = a.optBoolean("only_empty", false);
+                String em = Core.startPatrol(names, onlyEmpty);
+                if (em != null) return fail(em);
                 JSONObject o = new JSONObject();
                 o.put("ok", true);
+                o.put("only_empty", onlyEmpty);
                 /* 本轮编号：startPatrol 里同步 +1 并同步重置状态，
                    所以这个值就是本轮，前端拿它比对 status 就能排除上一轮的残留。 */
                 o.put("run_id", Core.runSeq);
@@ -1020,6 +1037,7 @@ public class MainActivity extends Activity {
                         ro.put("dir", r.dir == null ? JSONObject.NULL : r.dir);
                         ro.put("error", r.error == null ? JSONObject.NULL : r.error);
                         ro.put("skip", r.skip);
+                        ro.put("skip_reason", r.skipReason == null ? "" : r.skipReason);
                         JSONArray rep = new JSONArray();
                         /* 【v0.36 修订】巡站页「N 台·点行看截图」这张表也要跟置顶站名走。
                            和监控页一样是稳定排序：命中项按清单行序提前，其余保持
@@ -1033,9 +1051,13 @@ public class MainActivity extends Activity {
                         for (Core.ReportItem it : ordered) {
                             JSONObject io = new JSONObject();
                             io.put("device", it.device);
+                            /* 【v0.38c】设备编号也要给前端：弹窗里「重新获取这张」
+                               要靠它精确到台（站名会重名、会被改）。 */
+                            io.put("no", it.no == null ? "" : it.no);
                             io.put("status", it.status);
                             io.put("tag", "error".equals(it.status) ? "✗失败" : Core.statusTag(it.status));
                             io.put("preview", it.preview);
+                            io.put("note", it.note == null ? "" : it.note);
                             io.put("path", it.path);
                             io.put("pub", it.pubPath == null ? JSONObject.NULL : it.pubPath);
                             rep.put(io);
@@ -1072,8 +1094,10 @@ public class MainActivity extends Activity {
                         }
                         devs = kept;
                     }
-                    /* 【v0.36 修订】「选择站点」弹窗里的设备列表也按置顶站名排。
-                       用户勾站点的顺序和监控页看到的一致，不用再在一堆站里找。 */
+                    /* 【v0.36 修订】devices 接口返回的设备列表也按置顶站名排。
+                       v0.38d 起巡站页的「选择站点」弹窗已删（改成搜索框筛结果列表），
+                       这个接口暂时没有前端调用，排序逻辑先留着：
+                       以后再加任何「选设备」的入口，顺序要和监控页一致。 */
                     devs = DevOrder.sortItems(devs, new DevOrder.NameOf<Core.Dev>() {
                         public String name(Core.Dev d) { return d.name; }
                     }, Core.devOrderPinned());

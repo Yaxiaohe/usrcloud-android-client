@@ -116,6 +116,16 @@ public class Renderer {
 
     public static void render(String devName, String devNo, DevData data,
                               String outPath, String status) throws Exception {
+        render(devName, devNo, data, outPath, status, null);
+    }
+
+    /**
+     * @param noteOverride 非空时替换提示条原文。
+     *                     用来把「平台限流，这轮没取到数值」这类原因直接印在图上 ——
+     *                     图上只写「未能读取到变量数据」的话，用户会以为站点坏了。
+     */
+    public static void render(String devName, String devNo, DevData data,
+                              String outPath, String status, String noteOverride) throws Exception {
         // ---- 数据准备 ----
         /* 【v0.34】水温相关的变量排最前，其余保持平台原顺序（稳定分组）。
          * 关键顺序：**先排再截断**。平台返回的顺序是「谁先建的谁在前」，
@@ -172,6 +182,12 @@ public class Renderer {
         } else {
             noteOn = false;
             note = "未能读取到变量数据";
+        }
+        /* 【v0.38b】调用方有更具体的原因就照它写（例如「这轮没取到数值：平台限流…」）。
+           图上要能自证为什么是采集异常，否则用户只能翻日志。 */
+        if (noteOverride != null && !noteOverride.trim().isEmpty()) {
+            noteOn = false;
+            note = noteOverride.trim();
         }
 
         // ---- 尺寸（px = 逻辑 × 3），与 Python 版公式一致 ----

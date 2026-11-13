@@ -1,5 +1,9 @@
 /* 巡站页 */
 var lastResult = null;
+/* 【v0.38d】结果列表的搜索词（模糊筛站名 / 编号）。
+   放模块级是为了整页重绘（补跑、单张重拍、切页回来）之后还能留住，
+   用户搜着「站点E」补跑两台，回来不该又变成全量列表。 */
+var kwPatrol = '';
 
 /* 收集本次巡站所有截图路径，优先对外目录那份（用户能看到、能分享） */
 function collectShotPaths(r) {
@@ -223,6 +227,34 @@ function openShotPicker(paths) {
  * Java 侧的 openDir / openDirWith / filePickTree 桥接一并摘掉，
  * 免得留下没人调的入口（bridgetest 会把它们判成「Java 有、JS 没调」的死代码）。 */
 
+/* 上一轮「没取到数值」的站点统计（只统计，不改数据）。
+   口径必须和后端一致：online 有值、stale 只是旧，都算有数据；
+   offline / blank / error 才算没取到 —— 两边算不一样的话，
+   按钮上写「12 台」而后端只想跑 9 台，用户会以为按钮坏了。 */
+function emptyStat() {
+  var out = { total: 0, byAcc: {} };
+  var r = lastResult;
+  if (!r || !r.results) return out;
+  Object.keys(r.results).forEach(function (k) {
+    (r.results[k].report || []).forEach(function (it) {
+      if (it.status === 'online' || it.status === 'stale') return;
+      out.total++;
+      (out.byAcc[k] = out.byAcc[k] || []).push(it.device);
+    });
+  });
+  return out;
+}
+
+/* 「只跑没数据的站点」按钮：没有可补跑的就整个不出现，别占地方。 */
+function retryHtml() {
+  var es = emptyStat();
+  if (!es.total) return '';
+  return '<button class="blk" id="btnRetry" style="margin-top:10px">' +
+    '⟳　只跑没数据的 ' + es.total + ' 台</button>' +
+    '<div class="muted tiny" style="margin-top:6px;text-align:center">' +
+    '上一轮离线 / 采集异常 / 失败的站点，已取到值的不重跑</div>';
+}
+
 function V_patrol() {
   if (G.tab !== 'patrol') return;
   var h = G.health || {};
@@ -262,12 +294,19 @@ var allOn = accs.length > 0 && accs.every(function (a) { return G.picked[a.name]
   /* 控制区 */
   s += '<div class="card">' +
     '<button class="big" id="btnRun">▶　开始巡站截图</button>' +
+    /* 【v0.38b】只跑没数据的站点。
+       限流、隧道里弱网、平台抽风都会导致整批没取到值；补跑 47 台要等两分钟，
+       而这 47 台里往往只有十几台是空的 —— 这个按钮把它们挑出来单独跑。 */
+    retryHtml() +
     '<div class="two" style="margin-top:10px">' +
     '<button id="btnPause">‖　暂停</button>' +
     '<button id="btnExport">⬆　导出图片</button></div>' +
-    '<div class="two" style="margin-top:10px">' +
-    '<button class="sm" id="btnDevs">选择站点</button>' +
-    '<button class="sm" id="btnClean">清理往期</button></div></div>';
+    /* 【v0.38d】原来这里左边是「选择站点」，点开是个设备勾选弹窗，
+       勾完直接写进账号的 station_kw（站点过滤）—— 等于在巡站页改账号配置，
+       用户以为只是筛一下列表，结果账号的巡站范围被改了。
+       用户要求：删掉这个按钮，改成结果列表上方一个搜索框，只模糊筛列表、不动账号。
+       所以这里只剩「清理往期」，单独占一行。 */
+    '<button class="sm blk" id="btnClean" style="margin-top:10px">清理往期</button></div>';
 
   /* 截图保存位置：放在控制区下面。
      放页面最上方时，用户一进来先看到一长串路径，
@@ -378,10 +417,18 @@ function bindPatrol() {
     V_patrol();
   };
 
-  el('btnRun').onclick = function () {
+  /* 启动一轮（全跑 / 只跑没数据的，共用这套流程） */
+  function startRun(onlyEmpty) {
     if (G.busy) { toast('任务进行中'); return; }
-    var names = Object.keys(G.picked).filter(function (k) { return G.picked[k]; });
-    var r = api('run', { names: names });
+    var names;
+    if (onlyEmpty) {
+      /* 补跑时账号列表由「哪些账号有空的站点」决定，不看当前勾选 ——
+         用户可能只勾了一个账号，但上一轮是三个账号一起跑的。 */
+      names = Object.keys(emptyStat().byAcc);
+    } else {
+      names = Object.keys(G.picked).filter(function (k) { return G.picked[k]; });
+    }
+    var r = api('run', { names: names, only_empty: !!onlyEmpty });
     if (r.ok) {
       G.busy = true;
       /* 【v0.31 修订】记下本轮的 run_id。后端在 startPatrol 里同步重置状态并 +1 编号，
@@ -390,11 +437,19 @@ function bindPatrol() {
       resetLogs();   /* 【v0.22】日志改成合并式，新开一轮要连去重表一起清 */
       /* 【v0.22】新开一轮就把上轮结果连同落盘一起清掉，
          否则 loadResult() 会把旧的「看截图」入口捡回来，
-         跟本轮进度混在一起。 */
-      lastResult = null;
-      try { localStorage.removeItem(RESULT_KEY); } catch (e) { }
+         跟本轮进度混在一起。
+
+         【v0.38c】补跑例外：只补几台，其余站点这轮根本不跑，
+         清掉的话「正在补跑」这段时间里列表就只剩那几台，
+         用户会以为正常站点丢了。后端这轮做完会把完整结果回来（合并过）。 */
+      if (!onlyEmpty) {
+        lastResult = null;
+        try { localStorage.removeItem(RESULT_KEY); } catch (e) { }
+      }
+      G.onlyEmptyRun = !!onlyEmpty;
       G.seq = 0;
-      toast(names.length ? '开始巡站：' + names.length + ' 个账号' : '开始巡站：全部启用账号');
+      if (onlyEmpty) toast('只补跑没数据的 ' + names.length + ' 个账号');
+      else toast(names.length ? '开始巡站：' + names.length + ' 个账号' : '开始巡站：全部启用账号');
       pollStatus();
     } else if (r.running) {
       /* 【v0.31 修订】后端说任务正在跑 —— 这不是「错误」，是「跟着看进度」。
@@ -407,7 +462,13 @@ function bindPatrol() {
     } else {
       toast(r.msg || '启动失败');
     }
-  };
+  }
+
+  el('btnRun').onclick = function () { startRun(false); };
+
+  /* 只在有可补跑的站点时才存在这个按钮（retryHtml 里控制） */
+  var rb = el('btnRetry');
+  if (rb) rb.onclick = function () { startRun(true); };
 
   el('btnPause').onclick = function () {
     var r = api('pause', {});
@@ -418,7 +479,6 @@ function bindPatrol() {
 
   el('btnExport').onclick = exportImages;
 
-  el('btnDevs').onclick = openDevicePicker;
   el('btnClean').onclick = function () {
     confirmBox('清理往期批次',
       '将删除手机「' + (G.health && G.health.allFiles !== false ? '根目录' : '下载') +
@@ -467,6 +527,8 @@ function step() {
   if (r.finished || (!r.running && G.busy)) {
     clearInterval(stTid);
     stTid = null;
+    var wasRetry = !!G.onlyEmptyRun;
+    G.onlyEmptyRun = false;
     G.busy = false;
     G.runId = 0;
     var rr = api('result', {});
@@ -475,7 +537,10 @@ function step() {
     /* 【v0.31 修订】后端把「任务压根没跑起来」的原因放在 error 里
        （账号全停用之类），这时说「巡站完成，在线 0 台」是误导，
        直接把原因说给用户听。 */
+    /* 【v0.38c】补跑只说这轮的结果：整份列表里的「在线台数」是上一轮全跑出来的，
+       直接报总数会让人以为补跑把全部站点又跑了一遍。 */
     if (r.error) toast(r.error);
+    else if (wasRetry) toast('补跑完成，本轮在线 ' + (r.online || 0) + ' 台');
     else toast('巡站完成，在线 ' + (r.online || 0) + ' 台');
   }}
 
@@ -521,15 +586,42 @@ function paintProg() {
 function resultHtml(r) {
   var names = Object.keys(r.results || {});
   if (!names.length) return '';
-  var h = '';
+  var total = 0;
+  names.forEach(function (n) {
+    var rr = (r.results[n] || {}).report;
+    total += (rr ? rr.length : 0);
+  });
+  /* 【v0.38d】结果列表上方的搜索框（替代原来的「选择站点」按钮）。
+     只筛这张列表的显示，不改账号的站点过滤 —— 那是「我的 → 编辑账号」里的事。
+     输入框的值存在 kwPatrol 里，整页重绘（补跑 / 重拍后都会重绘）也能留住。 */
+  var h = '<div class="card"><h2><span id="ptTitle">巡站结果</span>' +
+    '<span class="r" id="ptCnt">' + total + ' 台</span></h2>' +
+    '<input id="pSearch" placeholder="搜索站名或编号" value="' + esc(kwPatrol) +
+    '" autocomplete="off">' +
+    '<div class="muted tiny" id="ptEmpty" style="display:none;margin-top:8px"></div></div>';
   names.forEach(function (n) {
     var a = r.results[n];
-    h += '<div class="card"><h2>' + esc(n) + '<span class="r">' +
-      (a.report ? a.report.length : 0) + ' 台<span class="tiny muted" style="font-weight:400">· 点行看截图</span></span></h2>';
+    /* 【v0.38d】台数包一层 [data-cnt]：搜索筛完要跟着变成「2 / 22」。
+       不跟着改的话，标题写着 22 台、下面只剩 2 行，看着像数据丢了。 */
+    h += '<div class="card"><h2>' + esc(n) + '<span class="r"><span data-cnt>' +
+      (a.report ? a.report.length : 0) + ' 台</span>' +
+      '<span class="tiny muted" style="font-weight:400">· 点行看截图</span></span></h2>';
+    /* 【v0.38b】整批都被平台限流时，先在卡片顶上说明白。
+       原来 47 台全是「✗失败」，用户看不出是自己网络问题、账号问题还是软件坏了；
+       现在明确告诉他是平台限流、等一会儿重跑就行，别去查站点。 */
+    var limited = 0;
+    (a.report || []).forEach(function (it) {
+      if (it.note && it.note.indexOf('限流') >= 0) limited++;
+    });
+    if (limited > 0) {
+      h += '<div class="bar w" style="margin-bottom:8px">⚠ ' + limited +
+        ' 台这次没取到数值：平台「最新值」接口限流（同一账号请求太频繁，约 20 秒自动恢复）。' +
+        '截图里变量名和状态仍在，数值为空不是站点掉线。稍后点「开始巡站截图」重跑一次即可。</div>';
+    }
     if (a.error) {
       h += '<div class="bar w">⚠ ' + esc(a.error) + '</div>';
     } else if (a.skip) {
-      h += '<div class="muted tiny">该账号无启用的设备，已跳过</div>';
+      h += '<div class="muted tiny">' + esc(a.skip_reason || '该账号无启用的设备，已跳过') + '</div>';
     } else if (a.report && a.report.length) {
       /* 结果用行而不是 table：行要整行可点，table 的td 不好做整行点击，
          而且设备名长的时候 td 会被挤得很难看 */
@@ -538,9 +630,19 @@ function resultHtml(r) {
         var cls = tag.indexOf('在线') >= 0 ? 'g' : (tag.indexOf('失败') >= 0 ? 'r' : 'y');
         /* 只有真截到图的行才可点，失败/离线的行点了没反应会让人以为坏了 */
         var shot = (it.pub || it.path || '');
-        return '<div class="ri' + (shot ? ' has' : '') + '"' +
+        /* 【v0.38b】站名下面补一行原因。没有这行的话，「采集异常」和「离线」
+           在界面上长得一样，用户只能去翻日志猜是限流、没权限还是网络断。 */
+        var note = it.note || '';
+        /* data-q 只给「模糊筛列表」用：站名 + 编号，小写。
+           过滤靠改 display，不重建 DOM —— 行里的 data-shot 带着序号，
+           重建会让序号和 lastResult.report 对不上，点开就是别人的图。 */
+        var q = ((it.device || '') + ' ' + (it.no || '')).toLowerCase();
+        return '<div class="ri' + (shot ? ' has' : '') + '" data-q="' + esc(q) + '"' +
           (shot ? ' data-shot="' + esc(n) + '|' + i + '"' : '') + '>' +
-          '<div class="t">' + esc(it.device) + '</div>' +
+          '<div class="t">' + esc(it.device) +
+          (note ? '<div class="tiny muted" style="margin-top:2px;font-weight:400">' +
+            esc(note) + '</div>' : '') +
+          '</div>' +
           '<span class="pill ' + cls + '">' + esc(tag) + '</span>' +
           (shot ? '<span class="ar">›</span>' : '') + '</div>';
       }).join('') + '</div>';
@@ -665,17 +767,20 @@ function openShot(acc, idx) {
         foot.className = 'mboxfoot';
         el('mbox').appendChild(foot);
       }
-      /* 【v0.26】底部按钮：多张时 = 三按钮行 + 通栏分享按钮；
-         单张时 = 分享 / 关闭 两个并排（没有切换按钮，不占地方）。 */
-      foot.innerHTML = many
+      /* 【v0.26】底部按钮：多张时 = 三按钮行 + 通栏按钮；
+         单张时 = 分享 / 关闭 两个并排（没有切换按钮，不占地方）。
+         【v0.38c】两种布局都加「⟳ 重新获取这张截图」：某一台当时被限流、
+         值全是 - 时，不必为这一台把整批重跑一遍。 */
+      foot.innerHTML = (many
         ? '<div class="three">' +
             '<button id="shotPrev">‹ 上一张</button>' +
             '<button id="shotClose">关闭</button>' +
-            '<button id="shotNext">下一张 ›</button></div>' +
-          '<button id="shotShare" class="sharebtn">⬆ 分享这张截图（微信 / QQ）</button>'
+            '<button id="shotNext">下一张 ›</button></div>'
         : '<div class="three">' +
             '<button id="shotShare">⬆ 分享到微信 / QQ</button>' +
-            '<button id="shotClose">关闭</button></div>';
+            '<button id="shotClose">关闭</button></div>') +
+        '<button id="shotReget" class="sharebtn">⟳ 重新获取这张截图</button>' +
+        (many ? '<button id="shotShare" class="sharebtn">⬆ 分享这张截图（微信 / QQ）</button>' : '');
 
       el('shotClose').onclick = closeBox;
 
@@ -693,22 +798,66 @@ function openShot(acc, idx) {
         Android.exportImages(JSON.stringify([p2]));
       };
 
-      /* 只有一张图时没什么可切的，直接渲染完就完事。 */
-      if (!many) {
-        var only = shotDataUri(list[0].it.pub || list[0].it.path);
-        var im0 = el('shotImg');
-        if (only) im0.src = only;
-        else {
-          im0.removeAttribute('src');
-          var tip0 = el('shotTip');
-          if (tip0) tip0.textContent = '这张打不开（可能已被清理）';
-        }
-        var t0 = el('shotTip');
-        if (t0 && only) t0.textContent = list[0].it.preview || '';
-        return;
-      }
+      var pv = many ? el('shotPrev') : null;
+      var nx = many ? el('shotNext') : null;
 
-      var pv = el('shotPrev'), nx = el('shotNext');
+      /* 【v0.38c】重新获取眼前这一张。
+         两段式：reshootStart 只起线程立刻返回，这里按 600ms 轮询；
+         同步等网络会把界面冻住（v0.37「刷新这台」踩过，最弱网 30 秒 0 帧）。
+         拿到结果后就地替换这一项 —— 列表范围不动，别的站点不动。 */
+      var reget = el('shotReget');
+      reget.onclick = function () {
+        var e2 = list[cur];
+        var it = e2 && e2.it;
+        if (!it) return;
+        if (!it.no) { toast('这一项没有设备编号，先巡一轮再来'); return; }
+        if (reget.disabled) return;
+        var oldTxt = reget.textContent;
+        reget.disabled = true;
+        reget.textContent = '正在获取…';
+        var r = api('reshootStart', { acc: e2.acc, no: it.no });
+        if (!r || !r.ok) {
+          reget.disabled = false;
+          reget.textContent = oldTxt;
+          toast((r && r.msg) || '启动失败');
+          return;
+        }
+        var t0 = Date.now();
+        var tid = setInterval(function () {
+          var p;
+          try { p = api('reshootPoll', { acc: e2.acc, no: it.no }); }
+          catch (ex) { p = null; }
+          if (!p) return;
+          if (p.running) {
+            var sec = Math.max(1, Math.round((Date.now() - t0) / 1000));
+            reget.textContent = '正在获取… ' + sec + ' 秒';
+            /* 写界面的字也要给个上限：真卡住了不能一直转下去 */
+            if (Date.now() - t0 > 90000) {
+              clearInterval(tid);
+              reget.disabled = false;
+              reget.textContent = oldTxt;
+              toast('还没取回来，稍后再点一次');
+            }
+            return;
+          }
+          clearInterval(tid);
+          reget.disabled = false;
+          reget.textContent = oldTxt;
+          if (!p.ok) { toast('没取到：' + (p.error || '未知原因')); return; }
+          /* 替换这一项：状态、说明、路径全换成新的 */
+          it.status = p.status;
+          it.tag = p.tag;
+          it.preview = p.preview;
+          it.note = p.note || '';
+          it.path = p.path;
+          it.pub = (p.pub === null || p.pub === undefined) ? '' : p.pub;
+          it.device = p.device || it.device;
+          saveResult(lastResult);     /* 连同落盘：关掉 app 再进来也是新图 */
+          if (G.tab === 'patrol') V_patrol();   /* 列表上的胶囊/说明同步换掉 */
+          paint();                     /* 弹窗里的图换成新这张 */
+          toast('已重新获取「' + it.device + '」');
+        }, 600);
+      };
 
       /* 渲染第 cur 张：换图、换标题、换副标题、刷新按钮禁用态 */
       function paint() {
@@ -743,10 +892,13 @@ function openShot(acc, idx) {
         }, 16);
 
         /* 【v0.26】标题带账号名（多账号时）：跨账号翻页的那一刻，
-           用户必须能看出「已经切到另一个账号的卡片了」。 */
+           用户必须能看出「已经切到另一个账号的卡片了」。
+           【v0.38c】只有一张时标题仍只写站名，不写「截图 1 / 1」。 */
         var h = el('mbox').querySelector('h3');
-        if (h) h.textContent = '截图 ' + (cur + 1) + ' / ' + list.length + '　' +
-          (multiAcc ? e.acc + ' · ' : '') + it.device;
+        if (h) h.textContent = many
+          ? '截图 ' + (cur + 1) + ' / ' + list.length + '　' +
+            (multiAcc ? e.acc + ' · ' : '') + it.device
+          : it.device;
         /* 【v0.26】翻过账号边界时按钮文字换成「上一账号 / 下一账号」，
            置灰（首尾）时保持默认文案 —— 置灰按钮的文字不参与表达。 */
         if (pv) {
@@ -768,8 +920,8 @@ function openShot(acc, idx) {
         paint();
       }
 
-      pv.onclick = function () { step(-1); };
-      nx.onclick = function () { step(1); };
+      if (pv) pv.onclick = function () { step(-1); };
+      if (nx) nx.onclick = function () { step(1); };
 
       /* 左右滑手势。判定条件三条同时满足才算切换：
          1) 位移超过 42px —— 太小的抖动（比如手指按住时轻微移动）不算；
@@ -808,6 +960,14 @@ function bindResult() {
   if (b) b.onclick = function () { exportImages(); };
   var main = el('main');
   if (!main) return;
+  /* 【v0.38d】结果列表搜索框：输入即筛，不重建列表。 */
+  var se = el('pSearch');
+  if (se) {
+    se.oninput = function () { kwPatrol = this.value; filterPatrol(); };
+    /* 重绘后用 kwPatrol 回填并重新套用过滤，否则输入框显示着字、列表却是全量 */
+    if (se.value !== kwPatrol) se.value = kwPatrol;
+    filterPatrol();
+  }
   main.querySelectorAll('[data-shot]').forEach(function (n) {
     n.onclick = function () {
       var v = n.getAttribute('data-shot');
@@ -817,120 +977,55 @@ function bindResult() {
   });
 }
 
-/* ---------- 站点选择 ---------- */
-function openDevicePicker() {
-  var accs = G.accounts.filter(function (a) { return a.enabled; });
-  if (!accs.length) { toast('没有启用的账号'); return; }
-  var acc = accs[0].name;
-  openBox('选择站点',
-    '<label class="fl">账号</label><select id="pkAcc">' +
-    accs.map(function (a) {
-      return '<option value="' + esc(a.name) + '">' + esc(a.name) + '</option>';
-    }).join('') + '</select>' +
-    '<div class="row" style="margin-top:10px"><button class="sm" id="pkLoad">⬇ 读取设备列表</button>' +
-    '<span class="sp"></span><span class="muted tiny" id="pkCnt"></span></div>' +
-    '<input id="pkKw" placeholder="搜索设备名或编号" autocomplete="off" ' +
-    'style="margin-top:10px;display:none">' +
-    '<div id="pkList" style="margin-top:10px"><div class="empty">先点「读取设备列表」</div></div>' +
-    '<div class="two" style="margin-top:14px"><button data-no>关闭</button>' +
-    '<button class="pri" data-ok>完成</button></div>');
+/* ---------- 结果列表搜索（v0.38d） ----------
+ *
+ * 用户要求：巡站页不要「选择站点」那个按钮 —— 它点开是设备勾选，
+ * 勾完直接改账号的 station_kw（站点过滤），等于在巡站页悄悄改了账号配置。
+ * 换成这里一个输入框，只模糊筛「结果列表」的显示，账号配置一概不动。
+ *
+ * 为什么用改 display 而不是重建列表：
+ *   每行带着 data-shot="账号|序号"，序号是 lastResult.report 的下标。
+ *   重建 DOM 时只要有一个账号被过滤掉一行，后面所有序号就会错位，
+ *   点开「站点E」看到的是别人的图 —— 这种错位在真机上极难发现。
+ *   所以只隐藏行，DOM 结构和序号一律不动。
+ */
+function filterPatrol() {
+  var main = el('main');
+  if (!main) return;
+  var q = (kwPatrol || '').trim().toLowerCase();
+  var rows = main.querySelectorAll('.ri[data-q]');
+  var shown = 0;
+  rows.forEach(function (n) {
+    var hit = !q || n.getAttribute('data-q').indexOf(q) >= 0;
+    n.style.display = hit ? '' : 'none';
+    if (hit) shown++;
+  });
 
-  var sel = {};
-  var pkDs = [];        // 当前账号读到的设备
-  var pkHits = {};     // no -> 是否在 station_kw 内
-  var kw = '';
+  /* 整张账号卡片都没有可见行时连卡片一起藏掉：
+     否则搜「站点E」会留下 3 个只剩标题的空白卡片，看着像加载失败。 */
+  main.querySelectorAll('.card').forEach(function (c) {
+    var rs = c.querySelectorAll('.ri[data-q]');
+    if (!rs.length) return;
+    var vis = 0;
+    rs.forEach(function (n) { if (n.style.display !== 'none') vis++; });
+    c.style.display = vis ? '' : 'none';
+    /* 卡片标题的台数跟着筛：不跟就会出现「标题 22 台、列表 2 行」 */
+    var cn = c.querySelector('[data-cnt]');
+    if (cn) cn.textContent = q ? (vis + ' / ' + rs.length + ' 台') : (rs.length + ' 台');
+  });
 
-  function paint() {
-    var list = pkDs;
-    if (kw) {
-      var q = kw.toLowerCase();
-      list = pkDs.filter(function (d) {
-        return ((d.name || '') + ' ' + (d.no || '')).toLowerCase().indexOf(q) >= 0;
-      });
-    }
-    el('pkList').innerHTML = list.length ? list.map(function (d) {
-      var on = !!sel[d.no];
-      return '<div class="item' + (on ? ' on' : '') + '" data-no2="' + esc(d.no) + '">' +
-        '<div class="row"><div class="chk' + (on ? ' on' : '') + '">✓</div>' +
-        '<div style="flex:1"><div class="t">' + esc(d.name) + '</div>' +
-        '<div class="s mono tiny">' + esc(d.no) + '</div></div>' +
-        (pkHits[d.no] ? '<span class="pill g">巡站内</span>' : '<span class="pill gray">被过滤</span>') +
-        '</div></div>';
-    }).join('') : '<div class="empty">' + (kw ? '没有匹配「' + esc(kw) + '」的设备' : '没有设备') + '</div>';
-    el('pkList').querySelectorAll('[data-no2]').forEach(function (n) {
-      n.onclick = function () {
-        var k = n.getAttribute('data-no2');
-        sel[k] = !sel[k];
-        n.className = 'item' + (sel[k] ? ' on' : '');
-        n.querySelector('.chk').className = 'chk' + (sel[k] ? ' on' : '');
-      };
-    });
-  }
-
-  el('pkAcc').onchange = function () {
-    acc = this.value;
-    sel = {};
-    pkDs = [];
-    pkHits = {};
-    kw = '';
-    el('pkKw').value = '';
-    el('pkKw').style.display = 'none';
-    el('pkList').innerHTML = '<div class="empty">先点「读取设备列表」</div>';
-    el('pkCnt').textContent = '';
-  };
-
-  el('pkLoad').onclick = function () {
-    var b = this;
-    b.disabled = true;
-    b.textContent = '读取中…';
-    el('pkList').innerHTML = '<div class="empty">正在登录并读取…</div>';
-    setTimeout(function () {
-      var r = api('devices', { name: acc });
-      b.disabled = false;
-      b.textContent = '⬇ 读取设备列表';
-      if (!r.ok) {
-        el('pkList').innerHTML = '<div class="bar w">⚠ ' + esc(r.msg || '读取失败') + '</div>';
-        return;
-      }
-      var ds = r.devices || [];
-      G.devCache[acc] = ds;
-      pkDs = ds;
-      var kw2 = (accs.filter(function (a) { return a.name === acc; })[0].station_kw) || [];
-      pkHits = {};
-      ds.forEach(function (d) {
-        pkHits[d.no] = kw2.length === 0 || kw2.some(function (k) { return (d.name || '').indexOf(k) >= 0; });
-      });
-      /* 设备少的时候不占地方，设备多了才显示搜索框 */
-      el('pkKw').style.display = ds.length > 8 ? 'block' : 'none';
-      paint();
-    }, 30);
-  };
-
-  el('pkKw').oninput = function () {
-    kw = this.value.trim();
-    paint();
-    el('pkCnt').textContent = kw
-      ? ('匹配 ' + el('pkList').querySelectorAll('[data-no2]').length + ' / ' + pkDs.length + ' 台')
-      : (pkDs.length ? pkDs.length + ' 台' : '');
-  };
-
-  var okBtn = el('mbox').querySelector('[data-ok]');
-  okBtn.onclick = function () {
-    var kws = Object.keys(sel).filter(function (k) { return sel[k]; });
-    var a = G.accounts.filter(function (x) { return x.name === acc; })[0];
-    if (!a) return;
-    a.station_kw = kws;
-    var r = api('accountSave', {
-      old_name: acc, name: a.name, account: a.account, password: a.password,
-      platform_id: a.platform_id, enabled: a.enabled, station_kw: kws
-    });
-    if (r.ok) {
-      G.accounts = r.accounts;
-      toast(kws.length ? '已按 ' + kws.length + ' 个站点编号过滤' : '已清除站点过滤');
-      closeBox();
-      V_patrol();
+  var cnt = el('ptCnt');
+  if (cnt) cnt.textContent = q ? (shown + ' / ' + rows.length + ' 台')
+                              : (rows.length + ' 台');
+  var ttl = el('ptTitle');
+  if (ttl) ttl.textContent = q ? ('巡站结果 · 搜「' + kwPatrol.trim() + '」') : '巡站结果';
+  var empty = el('ptEmpty');
+  if (empty) {
+    if (q && shown === 0) {
+      empty.textContent = '没有匹配「' + kwPatrol.trim() + '」的站点；清空输入框可看全部。';
+      empty.style.display = '';
     } else {
-      toast(r.msg || '保存失败');
+      empty.style.display = 'none';
     }
-  };
+  }
 }

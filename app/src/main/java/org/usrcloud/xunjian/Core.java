@@ -157,15 +157,25 @@ public class Core {
         public String dir;
         public String error;
         public boolean skip;
+        /* 【v0.38b】跳过的具体原因。空 = 用默认文案（该账号没有启用设备）。
+           补跑时是「上一轮没有需要补跑的站点」—— 跟「没有设备」完全是两件事，
+           前端照默认文案显示会误导。 */
+        public String skipReason;
         public final List<ReportItem> report = new ArrayList<>();
     }
 
     public static class ReportItem {
         public String device;
+        /* 【v0.38b】设备编号。原来只存站名，「只跑没数据的站点」没法回传给后端
+           （站名可能重名、也可能被用户改过），必须带上平台编号才能精确重跑。 */
+        public String no;
         public String status;
         public String preview;
         public String path;      // 私有目录里的文件
         public String pubPath;   // 对外目录里的文件（用户能看到、能分享的那个）
+        /* 【v0.38b】这一张为什么是这个状态。空 = 正常读到。
+           有值时前端在站名下面多显示一行，不必再让用户去翻日志猜。 */
+        public String note;
     }
 
     public static void init(Context c) {
@@ -834,6 +844,11 @@ public class Core {
     public static class Dev {
         public String no;
         public String name;
+        /* 【v0.38 修订】平台自己标的在线状态（"1" 在线 / "0" 离线）。
+           只用来交叉校验：平台说在线、我们却一条数值都没读到，
+           那多半是「刚上报还没同步」或「本轮被限流」，
+           不该直接判成「设备离线」把用户骗去现场。 */
+        public String online = "";
     }
 
     public static List<Dev> getDevices(String tok) throws Exception {
@@ -851,27 +866,62 @@ public class Core {
             Dev v = new Dev();
             v.no = d.optString("cusdeviceNo");
             v.name = d.optString("cusdeviceName");
+            v.online = d.optString("onlineOffline", "");
             out.add(v);
         }
         log("拉取到 " + out.size() + " 台设备");
         return out;
     }
 
-    /** 三步直调：元信息 / 变量点定义 / 最新值（约 0.3s/台）。 */
-    public static DevData fetchDeviceData(String tok, String devNo) throws Exception {
-        DevData dd = new DevData();
+    /* ================= 「平台拒绝」和「没有数据」必须分开 ================= */
 
-        JSONObject p1 = new JSONObject();
-        p1.put("cusdeviceNo", devNo);
-        JSONObject info = apiJson(INFO_URL, p1, tok, 30).optJSONObject("data");
-        if (info != null) {
-            dd.org = nz(info.optString("projectName"));
-            dd.tpl = nz(info.optString("templateName"));
-            dd.gw = nz(info.optString("deviceName"));
-            dd.addr = nz(info.optString("address"));
-            dd.platformOnline = info.optString("onlineOffline");
+    /**
+     * 平台明确拒绝（status != 0）时抛这个。
+     *
+     * 【为什么必须区分】fetchDeviceData 原来只看 data 字段：平台被限流（5144）
+     * 或权限不足（5004）时返回 {@code {"data": null}} 或空 list，代码把
+     * 「没问着」当成「这台没数据」，judge() 于是判成 offline ——
+     * 现象就是用户报的「小程序里明明有数，监控页却写着离线、所有变量是 -」，
+     * 而且这个错误状态会写进快照，下一轮巡检（默认 15 分钟）之前一直挂着。
+     *
+     * 实测到的拒绝码：5144 频率超限、5004 没有权限（cusdeviceNo 写成设备名也会）、
+     * 4013/1702 token 缺失或失效、42013 无权访问该设备。
+     */
+    public static class PlatformException extends Exception {
+        public final int code;
+        public final String what;   // 「变量表」「最新值」…
+        public final String info;   // 平台原文
+
+        PlatformException(String what, int code, String info) {
+            super(friendly(what, code, info));
+            this.what = what;
+            this.code = code;
+            this.info = info == null ? "" : info;
         }
 
+        static String friendly(String what, int code, String info) {
+            String tail = (info == null || info.trim().isEmpty()) ? "" : "（" + info.trim() + "）";
+            switch (code) {
+                case 5144: return "平台限流（5144），约 20 秒自动恢复";
+                case 5004: return "平台拒绝：" + what + "没有权限" + tail;
+                case 4013:
+                case 1702: return "登录已失效，重新登录后再试" + tail;
+                case 42013: return "平台不让查这台设备的" + what + tail;
+                default: return what + "读取失败：平台返回 " + code + tail;
+            }
+        }
+    }
+
+    /** 平台返回 status != 0 就抛。没有 status 字段的响应按成功处理。 */
+    private static void checkStatus(JSONObject r, String what) throws PlatformException {
+        if (r == null || !r.has("status")) return;
+        int st = r.optInt("status", 0);
+        if (st == 0) return;
+        throw new PlatformException(what, st, r.optString("info", r.optString("msg", "")));
+    }
+
+    /** 取一台设备的变量点定义（带拒绝判定）。 */
+    public static List<JSONObject> fetchPoints(String tok, String devNo) throws Exception {
         JSONObject p2 = new JSONObject();
         p2.put("dataPointType", "");
         p2.put("dataPointName", "");
@@ -885,48 +935,161 @@ public class Core {
         p2.put("getBitDatas", 0);
         p2.put("pageNo", 1);
         p2.put("pageSize", 500);
-        JSONObject pts = apiJson(POINTS_URL, p2, tok, 30);
-        JSONArray plst = new JSONArray();
-        JSONObject pd = pts.optJSONObject("data");
-        if (pd != null) plst = pd.optJSONArray("cusdeviceDataPointList");
-        if (plst == null) plst = new JSONArray();
-
-        // 第三步：按 dataPointRelId 批量取最新值
-        java.util.Map<String, JSONObject> lastByRel = new java.util.HashMap<>();
-        if (plst.length() > 0) {
-            JSONArray dps = new JSONArray();
+        JSONObject r = apiJson(POINTS_URL, p2, tok, 30);
+        checkStatus(r, "变量表");
+        List<JSONObject> out = new ArrayList<>();
+        JSONObject pd = r.optJSONObject("data");
+        JSONArray plst = pd == null ? null : pd.optJSONArray("cusdeviceDataPointList");
+        if (plst != null) {
             for (int i = 0; i < plst.length(); i++) {
-                JSONObject pt = plst.getJSONObject(i);
-                if (pt.isNull("dataPointRelId")) continue;
-                JSONObject o = new JSONObject();
-                o.put("cusdeviceNo", devNo);
-                o.put("dataPointId", pt.get("dataPointRelId"));
-                dps.put(o);
-            }
-            if (dps.length() > 0) {
-                JSONObject p3 = new JSONObject();
-                p3.put("dataPoints", dps);
-                JSONObject last = apiJson(LAST_URL, p3, tok, 30);
-                JSONObject ld = last.optJSONObject("data");
-                JSONArray ll = ld == null ? null : ld.optJSONArray("list");
-                if (ll != null) {
-                    for (int i = 0; i < ll.length(); i++) {
-                        JSONObject o = ll.getJSONObject(i);
-                        lastByRel.put(String.valueOf(o.opt("dataPointId")), o);
-                    }
-                }
+                JSONObject pt = plst.optJSONObject(i);
+                if (pt != null) out.add(pt);
             }
         }
+        return out;
+    }
 
+    /** 按变量点定义拼出「要查最新值」的请求体。dataPointRelId 为空的点跳过。 */
+    public static JSONArray lastPointsOf(String devNo, List<JSONObject> plst) throws Exception {
+        JSONArray dps = new JSONArray();
+        for (JSONObject pt : plst) {
+            if (pt.isNull("dataPointRelId")) continue;
+            JSONObject o = new JSONObject();
+            o.put("cusdeviceNo", devNo);
+            o.put("dataPointId", pt.get("dataPointRelId"));
+            dps.put(o);
+        }
+        return dps;
+    }
+
+    /* ===== 平台限流（5144）冷却 =====
+     *
+     * 【实测数据，2026-11-13，示例账号 47 台 / 1054 个点】
+     *   同一台 14 个点、每 3 秒发一次：第 6 次就被拒（累计 84 个点）；
+     *   全账号 1054 个点、每 3 秒发一次：连发 15 次全部通过（15,810 个点，1.2~2.0 秒/次）。
+     *
+     * 也就是说平台卡的是**请求次数**，不是一次带多少点。这一点很反直觉，但两边都复现了：
+     * 请求越碎越容易被拒，打包成一发反而安全。
+     *
+     * 被拒后约 20 秒恢复。这段时间里**一个请求都不要发**：
+     * 每次 5144 本身也算一次请求，继续硬敲只会把惩罚窗口越拖越长。
+     * 所以这里只记时刻，冷却期内由 fetchLastBatch 直接拒绝、不发网络请求。 */
+    private static volatile long limitedUntil = 0;
+    public static final int LIMIT_COOLDOWN_MS = 20000;
+
+    public static boolean coolingDown() {
+        return System.currentTimeMillis() < limitedUntil;
+    }
+
+    public static long cooldownLeftMs() {
+        return Math.max(0, limitedUntil - System.currentTimeMillis());
+    }
+
+    private static void markLimited() {
+        limitedUntil = System.currentTimeMillis() + LIMIT_COOLDOWN_MS;
+    }
+
+    /** 冷却结束就返回 true；超时返回 false（调用方据此决定是否继续等）。 */
+    public static boolean waitCooldown(long maxWaitMs) {
+        long t0 = System.currentTimeMillis();
+        while (coolingDown()) {
+            if (System.currentTimeMillis() - t0 > maxWaitMs) return false;
+            try {
+                Thread.sleep(300);
+            } catch (InterruptedException e) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 一次请求取一批点的最新值，返回 key = {@code cusdeviceNo|dataPointId} 的索引。
+     *
+     * 【为什么允许跨设备】实测一次带 47 台设备共 1054 个点仍返回 1048 条、0.9~2.0 秒；
+     * 一台一次的老做法在 94 台规模下要发 94 次，正是平台限流（5144）的诱因。
+     *
+     * 被拒就抛（并进入冷却），**不再等 1.2 秒重试** —— 实测 20 秒内重试都是白敲，
+     * 只会把那一次请求也赔进去。
+     */
+    public static java.util.Map<String, JSONObject> fetchLastBatch(String tok, JSONArray dps)
+            throws Exception {
+        if (dps == null || dps.length() == 0) return new java.util.HashMap<>();
+        if (coolingDown()) {
+            throw new PlatformException("最新值", 5144,
+                    "限流冷却中，还剩 " + (cooldownLeftMs() / 1000 + 1) + " 秒");
+        }
+        JSONObject p3 = new JSONObject();
+        p3.put("dataPoints", dps);
+        JSONObject r = apiJson(LAST_URL, p3, tok, 45);
+        if (r.has("status") && r.optInt("status", 0) == 5144) {
+            markLimited();
+            throw new PlatformException("最新值", 5144,
+                    r.optString("info", r.optString("msg", "请求过于频繁")));
+        }
+        checkStatus(r, "最新值");
+        return indexLast(r);
+    }
+
+    /**
+     * 分片版的批量取最新值。分片不是为了绕限流，而是防止单次请求体过大：
+     * 实测 1054 个点没问题，留一倍余量按 2000 切。
+     *
+     * 【为什么分片数要尽量少】限流按请求次数算，分 4 片就是 4 次请求。
+     * 94 台 × 14 点 ≈ 1300 点，正常情况下就是 1 次。
+     */
+    public static java.util.Map<String, JSONObject> fetchLastBatchChunked(
+            String tok, java.util.List<JSONObject> dps) throws Exception {
+        java.util.Map<String, JSONObject> out = new java.util.HashMap<>();
+        if (dps == null || dps.isEmpty()) return out;
+        int chunk = 2000;
+        for (int from = 0; from < dps.size(); from += chunk) {
+            JSONArray part = new JSONArray();
+            int to = Math.min(from + chunk, dps.size());
+            for (int i = from; i < to; i++) part.put(dps.get(i));
+            out.putAll(fetchLastBatch(tok, part));
+        }
+        return out;
+    }
+
+    /** 平台自称在线、我们却一条数值都没读到 → 判采集异常，别判离线。 */
+    public static String statusWithPlatform(String status, String platformOnline) {
+        if ("offline".equals(status) && "1".equals(platformOnline)) return "blank";
+        return status;
+    }
+
+    private static java.util.Map<String, JSONObject> indexLast(JSONObject r) {
+        java.util.Map<String, JSONObject> m = new java.util.HashMap<>();
+        JSONObject ld = r.optJSONObject("data");
+        JSONArray ll = ld == null ? null : ld.optJSONArray("list");
+        if (ll == null) return m;
+        for (int i = 0; i < ll.length(); i++) {
+            JSONObject o = ll.optJSONObject(i);
+            if (o == null) continue;
+            String no = o.optString("cusdeviceNo", "");
+            String rel = String.valueOf(o.opt("dataPointId"));
+            m.put(no + "|" + rel, o);
+            m.put("|" + rel, o);      // 兜底：少数响应不带 cusdeviceNo
+        }
+        return m;
+    }
+
+    /** 用「变量点定义 + 最新值索引」拼出 DevData（不发请求，纯解析）。 */
+    public static DevData dataFrom(String devNo, List<JSONObject> plst,
+                                   java.util.Map<String, JSONObject> lastByKey) {
+        DevData dd = new DevData();
         SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.CHINA);
-        for (int i = 0; i < plst.length(); i++) {
-            JSONObject pt = plst.getJSONObject(i);
+        for (JSONObject pt : plst) {
             String unit = pt.optString("unit", "").trim();
             String tm = "-";
             String cur = "-";
             Object relKey = pt.opt("dataPointRelId");
-            JSONObject r = relKey == null ? null
-                    : lastByRel.get(String.valueOf(relKey));
+            JSONObject r = null;
+            if (relKey != null) {
+                String rel = String.valueOf(relKey);
+                r = lastByKey.get(devNo + "|" + rel);
+                if (r == null) r = lastByKey.get("|" + rel);
+            }
             if (r != null) {
                 long ts = r.optLong("time", 0);
                 if (ts > 0) tm = sdf.format(new Date(ts));
@@ -939,23 +1102,53 @@ public class Core {
             dd.rows.add(new String[]{
                     String.valueOf(pt.opt("dataPointId")), pt.optString("name"),
                     "", tm, cur,
-                    /* 【v0.31】第 6 列（桌面版留的「操作」列）现在承载可写元信息：
+                    /* 【v0.31】第 6 列（桌面版留的「操作」列）承载可写元信息：
                        relId|readWrite|permissionOp|dataIdentifier。
-                       前端据此决定给不给「调整」按钮，Watch.setVar 据此拿下发用的 id。
-
-                       为什么必须带上：下发请求体的 dataPointId 要用 dataPointRelId，
-                       而 dataPointId 是模板级的另一个 id（实测 10641629 vs 42643797），
-                       两者混用不会报错、只会静默写到别的地方 —— 一列字符串挡住这个坑。
-
-                       可写判定 = readWrite==1（变量本身可写）且 permissionOp==1（当前账号有操作权限）。
-                       实测：线路乙账号 permissionOp 全 0 → 整账号不可调；
-                       线路甲账号有 102 个变量 permissionOp=1 → 可调。 */
+                       可写 = readWrite==1 且 permissionOp==1。 */
                     pt.optLong("dataPointRelId", 0) + "|"
                             + pt.optInt("readWrite", 0) + "|"
                             + pt.optInt("permissionOp", 0) + "|"
                             + pt.optString("dataIdentifier", "")});
         }
         return dd;
+    }
+
+    /** 取设备元信息（组织 / 模板 / 网关 / 地址 / 平台在线标志）。失败只记日志，不抛。 */
+    public static void fetchInfoInto(String tok, String devNo, DevData dd) {
+        try {
+            JSONObject p1 = new JSONObject();
+            p1.put("cusdeviceNo", devNo);
+            JSONObject ir = apiJson(INFO_URL, p1, tok, 30);
+            checkStatus(ir, "设备信息");
+            JSONObject info = ir.optJSONObject("data");
+            if (info != null) {
+                dd.org = nz(info.optString("projectName"));
+                dd.tpl = nz(info.optString("templateName"));
+                dd.gw = nz(info.optString("deviceName"));
+                dd.addr = nz(info.optString("address"));
+                dd.platformOnline = info.optString("onlineOffline");
+            }
+        } catch (Exception e) {
+            log("[设备] " + devNo + " 元信息没取到：" + e.getMessage());
+        }
+    }
+
+    /** 单台：元信息 / 变量点定义 / 最新值（三步直调，约 0.3s/台）。
+        【注意】巡站不再走这里（47 台会发 47 次最新值，必被限流），
+        保留它是给「单台调试/历史页」这类一次只要一台的场景用的。 */
+    public static DevData fetchDeviceData(String tok, String devNo) throws Exception {
+        DevData meta = new DevData();
+        fetchInfoInto(tok, devNo, meta);
+        List<JSONObject> plst = fetchPoints(tok, devNo);
+        java.util.Map<String, JSONObject> lastByKey = fetchLastBatch(tok, lastPointsOf(devNo, plst));
+        DevData out = dataFrom(devNo, plst, lastByKey);
+        /* 元信息从上面那一步带过来（dataFrom 只拼变量行） */
+        out.org = meta.org;
+        out.tpl = meta.tpl;
+        out.gw = meta.gw;
+        out.addr = meta.addr;
+        out.platformOnline = meta.platformOnline;
+        return out;
     }
 
     /** 给 MainActivity 的历史查询用（apiJson 本身是 private 的）。 */
@@ -1076,6 +1269,7 @@ public class Core {
             Dev v = new Dev();
             v.no = d.optString("cusdeviceNo");
             v.name = name;
+            v.online = d.optString("onlineOffline", "");
             out.add(v);
         }
         return out;
@@ -1099,11 +1293,301 @@ public class Core {
 
     // ---------------- 巡站调度 ----------------
 
-    public static void startPatrol(List<String> pickedNames) {
+    /** 一台设备的作业（巡站的三个阶段都用它跑）。 */
+    public interface DevTask {
+        void run(Dev d, int workerIdx, int idx, int total) throws Exception;
+    }
+
+    /**
+     * 把设备按 worker 数量轮转分发，等全部跑完才返回。
+     *
+     * 暂停：每台开工前检查一次，暂停时阻塞在这里（当前这台跑完才停）。
+     * 原来这段是内联在巡站循环里的，现在三个阶段都要用，抽出来避免抄三份。
+     */
+    private static void eachDev(List<Dev> devs, int workers, DevTask task) {
+        final int n = Math.max(1, workers);
+        List<java.util.concurrent.Future<?>> futs = new ArrayList<>();
+        for (int w = 0; w < n; w++) {
+            final int wi = w;
+            final List<Dev> mine = new ArrayList<>();
+            for (int i = wi; i < devs.size(); i += n) mine.add(devs.get(i));
+            if (mine.isEmpty()) continue;
+            futs.add(POOL.submit(() -> {
+                for (int i = 0; i < mine.size(); i++) {
+                    if (!waitWhilePaused()) return;
+                    try {
+                        task.run(mine.get(i), wi, i, mine.size());
+                    } catch (Exception e) {
+                        log("✗ 任务异常: " + e.getMessage());
+                    }
+                }
+            }));
+        }
+        for (java.util.concurrent.Future<?> fu : futs) {
+            try {
+                fu.get();
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    /** 暂停时阻塞；被中断返回 false（调用方据此收工）。 */
+    private static boolean waitWhilePaused() {
+        int guard = 0;
+        while (paused && guard++ < 200000) {
+            try {
+                Thread.sleep(200);
+            } catch (InterruptedException e) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+
+    /* 上一轮「没取到数值」的站点（账号 → 设备编号集合）。
+       「只跑没数据的站点」用它在开跑前过滤设备，跑完就清掉。
+       键用编号不用站名：站名可能重名，也可能被用户在平台上改过。 */
+    private static java.util.Map<String, java.util.Set<String>> pendingOnly = null;
+
+    /* 【v0.38c】补跑时的「底稿」：上一轮的完整结果。
+       补跑只跑没取到数值的几台，如果不管不顾地把 results 清空再写入，
+       结果列表就只剩这几台 —— 用户的原话是「正常的站点看不到了」。
+       所以补跑时先把上一轮结果留在这里，跑完每台再按设备编号合并回去：
+       跑过的替换、没跑的原样留着，顺序也按上一轮的来。 */
+    private static java.util.Map<String, AccountResult> baseResults = null;
+
+    public static String startPatrol(List<String> pickedNames) {
+        return startPatrol(pickedNames, false);
+    }
+
+    /* ---------------- 单台重新取一张截图（v0.38c） ----------------
+       截图弹窗里「⟳ 重新获取这张」用：只跑这一台。
+       成功后**直接替换**结果里那一项，列表范围、其它站点一概不动。
+
+       必须异步两段式（start / poll）：桥是同步调用，等网络就把界面冻住 ——
+       v0.37「刷新这台」踩过，弱网下单次请求最坏 30 秒、页面 0 帧。 */
+    private static final java.util.Map<String, JSONObject> RESHOOT =
+            java.util.Collections.synchronizedMap(new java.util.HashMap<String, JSONObject>());
+
+    /** 起一个后台任务取这一台。返回 null = 已开始；非 null = 没开始的原因。 */
+    public static String reshootStart(String accName, String devNo) {
+        if (accName == null || accName.isEmpty() || devNo == null || devNo.isEmpty()) {
+            return "缺少账号或设备编号";
+        }
+        final String key = accName + "|" + devNo;
+        synchronized (RESHOOT) {
+            JSONObject cur = RESHOOT.get(key);
+            if (cur != null && cur.optBoolean("running")) return "这台正在取，稍等";
+            JSONObject st = new JSONObject();
+            try {
+                st.put("running", true);
+            } catch (Exception ignored) {
+            }
+            RESHOOT.put(key, st);
+        }
+        POOL.execute(() -> {
+            JSONObject out;
+            try {
+                out = reshootOne(accName, devNo);
+                out.put("ok", true);
+            } catch (Exception e) {
+                out = new JSONObject();
+                try {
+                    out.put("ok", false);
+                    out.put("error", String.valueOf(e.getMessage()));
+                } catch (Exception ignored) {
+                }
+            }
+            try {
+                out.put("running", false);
+            } catch (Exception ignored) {
+            }
+            synchronized (RESHOOT) {
+                RESHOOT.put(key, out);
+            }
+        });
+        return null;
+    }
+
+    /** 查这一台取到没有。返回原文给前端：running / ok / error / item 字段。 */
+    public static JSONObject reshootPoll(String accName, String devNo) {
+        synchronized (RESHOOT) {
+            JSONObject o = RESHOOT.get(accName + "|" + devNo);
+            if (o != null) return o;
+        }
+        JSONObject r = new JSONObject();
+        try {
+            r.put("ok", false);
+            r.put("running", false);
+            r.put("error", "没有这次请求");
+        } catch (Exception ignored) {
+        }
+        return r;
+    }
+
+    private static JSONObject reshootOne(String accName, String devNo) throws Exception {
+        Account cfg = null;
+        for (Account a : loadAccounts()) {
+            if (accName.equals(a.name)) {
+                cfg = a;
+                break;
+            }
+        }
+        if (cfg == null) throw new Exception("账号不存在：" + accName);
+
+        String tok = ensureLogin(cfg);
+        DevData meta = new DevData();
+        fetchInfoInto(tok, devNo, meta);
+
+        List<JSONObject> plst = fetchPoints(tok, devNo);
+        List<JSONObject> dps = new ArrayList<>();
+        JSONArray arr = lastPointsOf(devNo, plst);
+        for (int i = 0; i < arr.length(); i++) dps.add(arr.getJSONObject(i));
+        /* 取不到就抛：旧图还在，别拿一张全 - 的新图把它换掉。 */
+        java.util.Map<String, JSONObject> last = fetchLastBatchChunked(tok, dps);
+
+        DevData data = dataFrom(devNo, plst, last);
+        data.org = meta.org;
+        data.tpl = meta.tpl;
+        data.gw = meta.gw;
+        data.addr = meta.addr;
+        data.platformOnline = meta.platformOnline;
+        String st = statusWithPlatform(data.judgeStatus(), data.platformOnline);
+        String note = "";
+
+        String devName = nameOf(accName, devNo);
+        if (devName == null) {
+            try {
+                for (Dev d : getDevices(tok)) {
+                    if (devNo.equals(d.no)) {
+                        devName = d.name;
+                        break;
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        if (devName == null || devName.isEmpty()) devName = devNo;
+
+        /* 放进上一轮的批次目录：这样补拍的图和整批在一起，
+           用户在文件管理器里翻同一个文件夹就能找到。
+           没有批次（直接开弹窗重拍）才新建一个。 */
+        File base = batchDir == null ? newBatchDir() : new File(batchDir);
+        File dir = new File(base, safeName(accName));
+        dir.mkdirs();
+        String fname = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.CHINA)
+                .format(new Date()) + "_" + safeName(devName) + ".png";
+        File out = new File(dir, fname);
+        Renderer.render(devName, devNo, data, out.getAbsolutePath(), st, note);
+        String pub = null;
+        try {
+            pub = ShotStore.publishAuto(base.getName() + "/" + dir.getName() + "/" + fname, out);
+        } catch (Exception e) {
+            Log.w("patrol", "重拍发布异常: " + e);
+        }
+
+        String vn = data.rows.size() > MAX_CARDS
+                ? "显示 " + MAX_CARDS + "/" + data.rows.size() + " 个变量（水温优先）"
+                : data.rows.size() + " 个变量（水温优先）";
+        ReportItem ri = new ReportItem();
+        ri.device = devName;
+        ri.no = devNo;
+        ri.status = st;
+        ri.preview = devName + " | " + vn + " | 数据" + DevData.fmtAge(data.ageMinutes());
+        ri.path = out.getAbsolutePath();
+        ri.pubPath = pub;
+        ri.note = note;
+
+        /* 就地替换结果里的那一项：不动列表范围、不动别的站点。
+           列表里没有这台（比如从别处进来）就追加。 */
+        synchronized (LOCK) {
+            AccountResult ar = results.get(accName);
+            if (ar == null) {
+                ar = new AccountResult();
+                ar.name = accName;
+                results.put(accName, ar);
+            }
+            boolean hit = false;
+            for (int i = 0; i < ar.report.size(); i++) {
+                if (devNo.equals(ar.report.get(i).no)) {
+                    ar.report.set(i, ri);
+                    hit = true;
+                    break;
+                }
+            }
+            if (!hit) ar.report.add(ri);
+        }
+        log("[重拍] " + accName + " · " + devName + " → " + statusTag(st));
+
+        JSONObject o = new JSONObject();
+        o.put("device", ri.device);
+        o.put("no", ri.no);
+        o.put("status", ri.status);
+        o.put("tag", "error".equals(ri.status) ? "✗失败" : statusTag(ri.status));
+        o.put("preview", ri.preview);
+        o.put("note", ri.note);
+        o.put("path", ri.path);
+        o.put("pub", ri.pubPath == null ? JSONObject.NULL : ri.pubPath);
+        return o;
+    }
+
+    /** 这台在哪张卡片上叫什么。结果里没有就返回 null，由调用方再查设备列表。 */
+    private static String nameOf(String accName, String devNo) {
+        synchronized (LOCK) {
+            AccountResult ar = results.get(accName);
+            if (ar != null) {
+                for (ReportItem it : ar.report) {
+                    if (devNo.equals(it.no) && it.device != null && !it.device.isEmpty()) {
+                        return it.device;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * @param onlyEmpty true = 只跑上一轮没取到数值的站点（离线 / 采集异常 / 失败），
+     *                  已取到值的不重跑。用于限流、弱网导致整批没取到时补跑。
+     * @return null = 已启动；非 null = 没能启动的原因（要原话交给前端）
+     */
+    public static String startPatrol(List<String> pickedNames, boolean onlyEmpty) {
         if (running) {
             log("已有任务在运行，忽略本次启动");
-            return;
+            return "已有任务在运行";
         }
+        /* 必须在 resetRunState() 之前算：那个方法会把 results 清空，
+           清空之后就没有「上一轮谁没取到」这个依据了。 */
+        java.util.Map<String, java.util.Set<String>> only = null;
+        if (onlyEmpty) {
+            only = new java.util.HashMap<>();
+            int total = 0;
+            synchronized (LOCK) {
+                for (java.util.Map.Entry<String, AccountResult> e : results.entrySet()) {
+                    java.util.Set<String> s = new java.util.HashSet<>();
+                    for (ReportItem it : e.getValue().report) {
+                        if (it.no == null || it.no.isEmpty()) continue;
+                        /* online 有值、stale 只是旧，都算「有数据」；
+                           其余（offline / blank / error）才是这次要补的。 */
+                        if (!"online".equals(it.status) && !"stale".equals(it.status)) s.add(it.no);
+                    }
+                    if (!s.isEmpty()) only.put(e.getKey(), s);
+                    total += s.size();
+                }
+            }
+            if (total == 0) {
+                return "上一轮没有「没取到数值」的站点，直接点「开始巡站截图」全跑即可";
+            }
+            log("[重跑] 只跑上一轮没取到数值的 " + total + " 台");
+        }
+        pendingOnly = only;
+
+        /* 【v0.38c】补跑前把上一轮结果抄一份当底稿。
+           必须是**深拷贝**：resetRunState() 会 results.clear()，
+           放着引用不管，清空之后底稿也跟着空了。 */
+        baseResults = only == null ? null : snapshotResults();
+
         /* 【v0.31 修订】状态重置必须在这里**同步**做完，不能等 worker 线程。
            原来 running/finished/onlineCount 这些都是在 runPatrol() 里才重置的，
            而 runPatrol 是 POOL.execute 丢出去的 —— 桥线程把 run 的返回值交给前端之后，
@@ -1118,8 +1602,100 @@ public class Core {
            run 一返回，前端读到的就是本轮（running=true / finished=false），
            同时 run_id 也已经是本轮的，任何残留状态都认得出来。 */
         resetRunState();
+        /* 【v0.38c】补跑：把底稿放回 results。
+           这样从点下补跑到第一台跑完这段时间，「结果」接口给出的仍是完整列表，
+           不会出现「列表突然只剩几台、跑完才长回来」的空窗。 */
+        if (baseResults != null) {
+            synchronized (LOCK) {
+                results.putAll(baseResults);
+            }
+        }
         long myRun = ++runSeq;
         POOL.execute(() -> runPatrol(pickedNames, myRun));
+        return null;
+    }
+
+    /* ---------------- 补跑时的结果合并（v0.38c） ----------------
+       补跑只覆盖「上一轮没取到数值」的那几台，别的站点这轮根本没跑，
+       它们的截图与状态必须原样留着 —— 否则用户点完补跑，
+       列表里就只剩这几台，正常的站点全没了。 */
+
+    /** 抄一份当前结果。深拷贝到 ReportItem 一级，够用且不必序列化。 */
+    private static java.util.Map<String, AccountResult> snapshotResults() {
+        java.util.Map<String, AccountResult> m = new java.util.HashMap<>();
+        synchronized (LOCK) {
+            for (java.util.Map.Entry<String, AccountResult> e : results.entrySet()) {
+                AccountResult src = e.getValue();
+                AccountResult a = new AccountResult();
+                a.name = src.name;
+                a.dir = src.dir;
+                a.error = src.error;
+                a.skip = src.skip;
+                a.skipReason = src.skipReason;
+                for (ReportItem it : src.report) a.report.add(copyItem(it));
+                m.put(e.getKey(), a);
+            }
+        }
+        return m;
+    }
+
+    private static ReportItem copyItem(ReportItem it) {
+        ReportItem c = new ReportItem();
+        c.device = it.device;
+        c.no = it.no;
+        c.status = it.status;
+        c.preview = it.preview;
+        c.path = it.path;
+        c.pubPath = it.pubPath;
+        c.note = it.note;
+        return c;
+    }
+
+    /** 合并键：设备编号优先。站名会重名、也会被用户在平台上改，编号才稳。 */
+    private static String itemKey(ReportItem it) {
+        if (it.no != null && !it.no.isEmpty()) return "n:" + it.no;
+        return "d:" + (it.device == null ? "" : it.device);
+    }
+
+    /** 把本轮跑出来的账号结果并入总表。
+        补跑时按上一轮的顺序做骨架：跑过的位置替换成新结果，没跑的原样保留，
+        新冒出来的设备追加在末尾。顺序不变，列表就不会跳。 */
+    private static void publishAccount(String acc, AccountResult ar) {
+        if (baseResults != null) {
+            AccountResult old = baseResults.get(acc);
+            if (old != null) {
+                java.util.Map<String, ReportItem> fresh = new java.util.HashMap<>();
+                for (ReportItem n : ar.report) fresh.put(itemKey(n), n);
+                List<ReportItem> merged = new ArrayList<>();
+                java.util.Set<String> used = new java.util.HashSet<>();
+                for (ReportItem o : old.report) {
+                    String k = itemKey(o);
+                    ReportItem n = fresh.get(k);
+                    if (n != null) {
+                        merged.add(n);
+                        used.add(k);
+                    } else {
+                        merged.add(o);
+                    }
+                }
+                for (ReportItem n : ar.report) {
+                    if (!used.contains(itemKey(n))) merged.add(n);
+                }
+                ar.report.clear();
+                ar.report.addAll(merged);
+                /* 本轮没出图的账号（skip）沿用上一轮的目录，导出/查看仍指着那批图 */
+                if ((ar.dir == null || ar.dir.isEmpty()) && old.dir != null) ar.dir = old.dir;
+                /* 本轮这台账号一台都没跑，但底稿里还有别的站点 —— 那就不是「跳过」，
+                   界面上不能写「上一轮没有需要补跑的站点」而把整块藏起来。 */
+                if (ar.skip && !ar.report.isEmpty()) {
+                    ar.skip = false;
+                    ar.skipReason = null;
+                }
+            }
+        }
+        synchronized (LOCK) {
+            results.put(acc, ar);
+        }
     }
 
     /** 新一轮开始的同步重置。桥线程调用，所以前端第一拍就能看到 running=true。
@@ -1229,8 +1805,33 @@ public class Core {
                     if (devs.isEmpty()) {
                         log("[提示] 该账号没有可巡站点，跳过");
                         ar.skip = true;
-                        results.put(acc, ar);
+                        publishAccount(acc, ar);
                         continue;
+                    }
+
+                    /* 【v0.38b】「只跑没数据的站点」：按上一轮的结果过滤。
+                       放在关键词过滤之后 —— 先按配置圈定本账号该管的站，
+                       再从中挑出上次没取到数值的，两个条件同时生效。 */
+                    if (pendingOnly != null) {
+                        java.util.Set<String> want = pendingOnly.get(acc);
+                        if (want == null || want.isEmpty()) {
+                            log("[重跑] " + acc + "：上一轮没有需要补跑的站点，跳过");
+                            ar.skip = true;
+                            ar.skipReason = "上一轮没有需要补跑的站点";
+                            publishAccount(acc, ar);
+                            continue;
+                        }
+                        List<Dev> kept2 = new ArrayList<>();
+                        for (Dev d : devs) if (want.contains(d.no)) kept2.add(d);
+                        log("[重跑] " + acc + "：只跑 " + kept2.size() + " / " + devs.size() + " 台");
+                        devs = kept2;
+                        if (devs.isEmpty()) {
+                            log("[重跑] " + acc + "：要补跑的站点已不在设备列表里，跳过");
+                            ar.skip = true;
+                            ar.skipReason = "要补跑的站点已不在设备列表里";
+                            publishAccount(acc, ar);
+                            continue;
+                        }
                     }
 
                     totalCount += devs.size();
@@ -1239,94 +1840,177 @@ public class Core {
                     outDir.mkdirs();
                     ar.dir = outDir.getAbsolutePath();
 
+                    /* 【v0.38b】取数顺序改成三段：并行取变量名 → 按账号一发取全部最新值 → 并行出图。
+       
+                       为什么必须这么改：平台「最新值」接口按**请求次数**限流（账号级），
+                       实测同一台 14 点每 3 秒发一次，第 6 次就 5144；而一次带全账号
+                       1054 个点连发 15 次全部通过（1.2~2.0 秒/次）。
+                       老做法是 47 台各发一次 = 47 次请求，4 线程几秒内打完，必然超频 ——
+                       于是用户看到「示例账号 47 台全红 ✗失败」。
+                       改成一次请求后，47 台只发 1 次，和监控页同一个路数。 */
                     final String ftok = tok;
                     final File fout = outDir;
                     final String facc = acc;
                     final List<Dev> fdevs = devs;
                     final AtomicInteger prog = new AtomicInteger(0);
-                    int n = Math.max(1, WORKERS);
-                    List<java.util.concurrent.Future<?>> futs = new ArrayList<>();
-                    for (int w = 0; w < n; w++) {
-                        final int wi = w;
-                        final List<Dev> mine = new ArrayList<>();
-                        for (int i = wi; i < fdevs.size(); i += n) mine.add(fdevs.get(i));
-                        if (mine.isEmpty()) continue;
-                        futs.add(POOL.submit(() -> {
-                            for (int i = 0; i < mine.size(); i++) {
-                                // 暂停时阻塞在此：当前设备跑完后停住，恢复后继续
-                                int guard = 0;
-                                while (paused && guard++ < 200000) {
-                                    try {
-                                        Thread.sleep(200);
-                                    } catch (InterruptedException e) {
-                                        return;
-                                    }
-                                }
-                                Dev d = mine.get(i);
-                                try {
-                                    DevData data = fetchDeviceData(ftok, d.no);
-                                    String status = data.judgeStatus();
-                                    String fname = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.CHINA)
-                                            .format(new Date()) + "_" + safeName(d.name) + ".png";
-                                    String path = new File(fout, fname).getAbsolutePath();
-                                    Renderer.render(d.name, d.no, data, path, status);
-                                    // 复制一份到用户能在文件管理器里看到的位置
-                                    // （根目录需「所有文件访问」，没授权就落「下载」目录，不需要权限）
-                                    String pub = null;
-                                    try {
-                                        String rel = batchName + "/" + fout.getName() + "/" + fname;
-                                        pub = ShotStore.publishAuto(rel, new File(path));
-                                        if (pub != null && pubCnt.getAndIncrement() == 0) {
-                                            log("[截图] 对外目录：" + ShotStore.displayPath());
-                                        }
-                                        /* 记下「这张已经有对外副本」，收尾时删掉内部那份。
-                                           没记下的（pub == null）一律保留 —— 那是唯一的图。 */
-                                        if (pub != null) pubPriv.add(path);
-                                    } catch (Exception pe) {
-                                        Log.w("patrol", "截图发布异常: " + pe);
-                                    }
-                                    String vn = data.rows.size() + " 个变量（水温优先）";
-                                    if (data.rows.size() > MAX_CARDS) {
-                                        vn = "显示 " + MAX_CARDS + "/" + data.rows.size()
-                                                + " 个变量（水温优先）";
-                                    }
-                                    String preview = d.name + " | " + vn + " | 数据"
-                                            + DevData.fmtAge(data.ageMinutes());
-                                    synchronized (LOCK) {
-                                        ReportItem ri = new ReportItem();
-                                        ri.device = d.name;
-                                        ri.status = status;
-                                        ri.preview = preview;
-                                        ri.path = path;
-                                        ri.pubPath = pub;
-                                        ar.report.add(ri);
-                                    }
-                                    log("[" + facc + "][w" + wi + "] (" + (i + 1) + "/" + mine.size()
-                                            + ") " + statusTag(status) + " " + d.name);
-                                } catch (Exception e) {
-                                    failCnt.incrementAndGet();
-                                    synchronized (LOCK) {
-                                        ReportItem ri = new ReportItem();
-                                        ri.device = d.name;
-                                        ri.status = "error";
-                                        ri.preview = String.valueOf(e.getMessage());
-                                        ri.path = "";
-                                        ar.report.add(ri);
-                                    }
-                                    log("[" + facc + "][w" + wi + "] (" + (i + 1) + "/" + mine.size()
-                                            + ") ✗ " + d.name + " :: " + e);
-                                }
-                                int c = prog.incrementAndGet();
-                                doneCount = c;
+                    int nWorkers = Math.max(1, WORKERS);
+
+                    /* ---- 阶段 1：并行取变量表 + 元信息（apimp，不受最新值限流影响）---- */
+                    stage = acc + " · 读取变量名";
+                    final java.util.Map<String, List<JSONObject>> ptsByDev =
+                            java.util.Collections.synchronizedMap(new java.util.HashMap<String, List<JSONObject>>());
+                    final java.util.Map<String, DevData> metaByDev =
+                            java.util.Collections.synchronizedMap(new java.util.HashMap<String, DevData>());
+                    final java.util.Map<String, String> ptsErr =
+                            java.util.Collections.synchronizedMap(new java.util.HashMap<String, String>());
+                    eachDev(fdevs, nWorkers, new DevTask() {
+                        public void run(Dev d, int wi, int idx, int total) {
+                            try {
+                                DevData meta = new DevData();
+                                fetchInfoInto(ftok, d.no, meta);
+                                metaByDev.put(d.no, meta);
+                                ptsByDev.put(d.no, fetchPoints(ftok, d.no));
+                            } catch (Exception e) {
+                                ptsErr.put(d.no, String.valueOf(e.getMessage()));
                             }
-                        }));
-                    }
-                    for (java.util.concurrent.Future<?> fu : futs) {
+                            /* 这里**不能**动 doneCount：进度是按「多少台出完图」算的，
+                               变量名读完只是中间一步。两处都自增会让进度条直接翻倍到 200%。 */
+                        }
+                    });
+                    int nPts = 0;
+                    for (List<JSONObject> l : ptsByDev.values()) nPts += l.size();
+                    log("[变量名] " + ptsByDev.size() + " / " + fdevs.size() + " 台读完，共 "
+                            + nPts + " 个变量");
+
+                    /* ---- 阶段 2：一次请求取全账号最新值 ---- */
+                    stage = acc + " · 读取最新值";
+                    List<JSONObject> allDps = new ArrayList<>();
+                    for (java.util.Map.Entry<String, List<JSONObject>> e : ptsByDev.entrySet()) {
                         try {
-                            fu.get();
+                            JSONArray one = lastPointsOf(e.getKey(), e.getValue());
+                            for (int i = 0; i < one.length(); i++) allDps.add(one.getJSONObject(i));
                         } catch (Exception ignored) {
                         }
                     }
+                    java.util.Map<String, JSONObject> lastByKey = new java.util.HashMap<>();
+                    String lastErr = null;
+                    if (!allDps.isEmpty()) {
+                        try {
+                            lastByKey = fetchLastBatchChunked(ftok, allDps);
+                            log("[最新值] " + allDps.size() + " 个点，一次请求取回 "
+                                    + lastByKey.size() + " 条");
+                        } catch (Exception e) {
+                            lastErr = String.valueOf(e.getMessage());
+                            log("[最新值] ✗ " + lastErr);
+                            /* 被限流时平台约 20 秒恢复。只等一次、只重试一次：
+                               重试次数越多，赔进去的请求也越多。 */
+                            if (coolingDown() && waitCooldown(25000)) {
+                                try {
+                                    lastByKey = fetchLastBatchChunked(ftok, allDps);
+                                    lastErr = null;
+                                    log("[最新值] 冷却后重试成功，取回 " + lastByKey.size() + " 条");
+                                } catch (Exception e2) {
+                                    lastErr = String.valueOf(e2.getMessage());
+                                    log("[最新值] ✗ 重试仍失败：" + lastErr);
+                                }
+                            }
+                        }
+                    }
+
+                    /* ---- 阶段 3：并行拼装 + 判状态 + 出图 ---- */
+                    stage = acc + " · 生成截图";
+                    final java.util.Map<String, JSONObject> flast = lastByKey;
+                    final String flastErr = lastErr;
+                    final int fTotal = fdevs.size();
+                    eachDev(fdevs, nWorkers, new DevTask() {
+                        public void run(Dev d, int wi, int idx, int total) {
+                            String st;
+                            String note = "";
+                            DevData data;
+                            List<JSONObject> plst = ptsByDev.get(d.no);
+                            DevData meta = metaByDev.get(d.no);
+                            if (plst == null) {
+                                data = meta == null ? new DevData() : meta;
+                                String pe = ptsErr.get(d.no);
+                                st = "blank";
+                                note = "这台的变量名没取到" + (pe == null ? "" : "：" + pe);
+                            } else {
+                                data = dataFrom(d.no, plst, flast);
+                                if (meta != null) {
+                                    data.org = meta.org;
+                                    data.tpl = meta.tpl;
+                                    data.gw = meta.gw;
+                                    data.addr = meta.addr;
+                                    data.platformOnline = meta.platformOnline;
+                                }
+                                st = statusWithPlatform(data.judgeStatus(), data.platformOnline);
+                                if (flastErr != null) {
+                                    /* 批量那一发被平台拒了：值全是 -，但这跟「设备没上报」是
+                                       两件事，不能判离线。说清原因，图照出（变量名还在）。 */
+                                    st = "blank";
+                                    note = "这轮没取到数值：" + flastErr;
+                                }
+                            }
+                            try {
+                                String fname = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.CHINA)
+                                        .format(new Date()) + "_" + safeName(d.name) + ".png";
+                                String path = new File(fout, fname).getAbsolutePath();
+                                Renderer.render(d.name, d.no, data, path, st, note);
+                                // 复制一份到用户能在文件管理器里看到的位置
+                                // （根目录需「所有文件访问」，没授权就落「下载」目录，不需要权限）
+                                String pub = null;
+                                try {
+                                    String rel = batchName + "/" + fout.getName() + "/" + fname;
+                                    pub = ShotStore.publishAuto(rel, new File(path));
+                                    if (pub != null && pubCnt.getAndIncrement() == 0) {
+                                        log("[截图] 对外目录：" + ShotStore.displayPath());
+                                    }
+                                    /* 记下「这张已经有对外副本」，收尾时删掉内部那份。
+                                       没记下的（pub == null）一律保留 —— 那是唯一的图。 */
+                                    if (pub != null) pubPriv.add(path);
+                                } catch (Exception pe) {
+                                    Log.w("patrol", "截图发布异常: " + pe);
+                                }
+                                String vn = data.rows.size() + " 个变量（水温优先）";
+                                if (data.rows.size() > MAX_CARDS) {
+                                    vn = "显示 " + MAX_CARDS + "/" + data.rows.size()
+                                            + " 个变量（水温优先）";
+                                }
+                                String preview = note.isEmpty()
+                                        ? d.name + " | " + vn + " | 数据" + DevData.fmtAge(data.ageMinutes())
+                                        : d.name + " | " + vn + " | " + note;
+                                synchronized (LOCK) {
+                                    ReportItem ri = new ReportItem();
+                                    ri.device = d.name;
+                                    ri.no = d.no;
+                                    ri.status = st;
+                                    ri.preview = preview;
+                                    ri.path = path;
+                                    ri.pubPath = pub;
+                                    ri.note = note;
+                                    ar.report.add(ri);
+                                }
+                                log("[" + facc + "][w" + wi + "] (" + (idx + 1) + "/" + total
+                                        + ") " + statusTag(st) + " " + d.name
+                                        + (note.isEmpty() ? "" : " — " + note));
+                            } catch (Exception e) {
+                                failCnt.incrementAndGet();
+                                synchronized (LOCK) {
+                                    ReportItem ri = new ReportItem();
+                                    ri.device = d.name;
+                                    ri.no = d.no;
+                                    ri.status = "error";
+                                    ri.preview = String.valueOf(e.getMessage());
+                                    ri.note = String.valueOf(e.getMessage());
+                                    ri.path = "";
+                                    ar.report.add(ri);
+                                }
+                                log("[" + facc + "][w" + wi + "] (" + (idx + 1) + "/" + total
+                                        + ") ✗ " + d.name + " :: " + e);
+                            }
+                            doneCount = prog.incrementAndGet();
+                        }
+                    });
 
                     int aOn = 0;
                     for (ReportItem r : ar.report) {
@@ -1344,7 +2028,7 @@ public class Core {
                     ar.error = String.valueOf(e.getMessage());
                     log("✗ 账号 " + acc + " 失败: " + e);
                 }
-                results.put(acc, ar);
+                publishAccount(acc, ar);
             }
 
             // 打包

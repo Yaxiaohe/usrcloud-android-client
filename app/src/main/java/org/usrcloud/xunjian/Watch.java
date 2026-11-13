@@ -36,6 +36,13 @@ public class Watch {
     public static final int CONCURRENCY = 3;
     public static final int MAX_BACKOFF = 3600;       // 连续失败最大退避
     public static final int BACKOFF_429 = 1800;       // 触发风控后暂停
+    /* 一次「取最新值」请求里塞多少个点。
+       【v0.38b 改 400 → 2000】平台限流是按**请求次数**算的，跟一次带多少点无关：
+       实测同一台 14 点每 3 秒发一次，第 6 次就被拒；而一次带全账号 1054 点
+       连发 15 次全部通过（1.2~2.0 秒/次）。所以分片越少越好 ——
+       原来 400 个点一片，47 台 1054 点要发 3 次，3 秒一轮就是 60 次/分，
+       这本身就是账号被限流的主因。2000 个点留了一倍余量，94 台 × 14 点通常一发完事。 */
+    public static final int LAST_CHUNK = 2000;
 
     public static final Map<String, String> ST_TEXT = new LinkedHashMap<>();
     public static final Map<String, String> STATUS_LEVEL = new LinkedHashMap<>();
@@ -225,6 +232,14 @@ public class Watch {
         public List<String[]> rows = new ArrayList<>();
         /** 上一次的判定，用来判断「是否变化」 */
         public String prevStatus = null;
+        /* 【v0.38 修订】这一轮没取到数据时，把原因留在这里给界面显示。
+           「设备离线」和「我们自己没问着」是两件事，不能都画成红色离线。
+           空字符串 = 本轮正常取到，没有额外说明。 */
+        public String note = "";
+        /* 【v0.38 修订】这一轮到底有没有真去平台取到数据。
+           false = 状态是从上一轮沿用下来的（限流/权限/网络），
+           这种设备不参与提醒判定 —— 否则被限流一次就会按旧状态反复报警。 */
+        public boolean fresh = true;
 
         public String statusText() {
             return ST_TEXT.getOrDefault(status, status);
@@ -643,7 +658,11 @@ public class Watch {
             st.name = old == null ? devNo : old.name;
             st.prevStatus = old == null ? null : old.status;
         }
-        st.status = judge(dd, staleMinutes);
+        st.status = judge(dd, staleMinutes, "1".equals(dd.platformOnline));
+        if ("1".equals(dd.platformOnline) && "blank".equals(st.status)) {
+            /* 平台说在线、却没读到数值：说清楚，别让用户以为站点掉线 */
+            st.note = "平台显示在线，这次没读到数值（可能刚上报）";
+        }
         st.ageMin = dd.ageMinutes();
         st.rows = dd.rows;
         st.dataTime = newestTime(dd);
@@ -861,6 +880,7 @@ public class Watch {
             o.put("age_min", s.ageMin);
             o.put("age_text", DevData.fmtAge(s.ageMin));
             o.put("data_time", s.dataTime);
+            o.put("note", s.note == null ? "" : s.note);
             o.put("rows", rowsJson(s.rows));
         } catch (Exception ignored) {
         }
@@ -948,33 +968,112 @@ public class Watch {
                     List<Core.Dev> devs = Core.getDevicesQuiet(tok, cfg.hasFilter() ? cfg.keywords() : null);
                     devTotal += devs.size();
 
+                    /* 【v0.38 修订】先把这一账号的变量表收齐，再把「最新值」合并成一两次请求。
+                       原来是一台一次 LAST：47 台就是 47 次，三个账号近百次；平台对
+                       history 接口有频控（实测返回 status=5144 "Request frequency reached the limit"，
+                       data 直接给 null），后半截设备因此一条值都拿不到，被 judge() 判成「离线」——
+                       用户看到的正是「小程序里有数、监控页离线、所有变量是 -」。
+                       实测一次带 47 台共 1054 个点仍能返回 1048 条、0.9 秒，合批是安全的。 */
+                    java.util.Map<String, List<JSONObject>> ptsByDev = new LinkedHashMap<>();
+                    java.util.Map<String, String> errByDev = new LinkedHashMap<>();
+                    scanProgress = "正在读 " + accName + " 的变量表（" + devs.size() + " 台）…";
+                    int read = 0;
                     for (Core.Dev d : devs) {
                         rateLimit();
+                        try {
+                            ptsByDev.put(d.no, Core.fetchPoints(tok, d.no));
+                        } catch (Exception e) {
+                            errByDev.put(d.no, msgOf(e));
+                        }
+                        read++;
+                        if (read % 10 == 0) {
+                            scanProgress = "已读变量表 " + read + " / " + devs.size() + " 台…";
+                        }
+                    }
+
+                    JSONArray allDps = new JSONArray();
+                    for (java.util.Map.Entry<String, List<JSONObject>> e : ptsByDev.entrySet()) {
+                        JSONArray one = Core.lastPointsOf(e.getKey(), e.getValue());
+                        for (int i = 0; i < one.length(); i++) allDps.put(one.get(i));
+                    }
+                    java.util.Map<String, JSONObject> lastByKey = new java.util.HashMap<>();
+                    String batchErr = null;
+                    int chunks = 0;
+                    scanProgress = "正在读 " + accName + " 的最新值（" + allDps.length() + " 个点）…";
+                    for (int from = 0; from < allDps.length(); from += LAST_CHUNK) {
+                        JSONArray part = new JSONArray();
+                        int to = Math.min(from + LAST_CHUNK, allDps.length());
+                        for (int i = from; i < to; i++) part.put(allDps.get(i));
+                        try {
+                            lastByKey.putAll(Core.fetchLastBatch(tok, part));
+                            chunks++;
+                        } catch (Exception e) {
+                            batchErr = msgOf(e);
+                            break;
+                        }
+                    }
+                    if (batchErr != null) {
+                        /* 一整批失败只影响这次的值，不等于设备离线 —— 下面逐台保留上一轮状态 */
+                        Core.log("[监控] " + accName + " 最新值批量读取失败（"
+                                + chunks + "/" + ((allDps.length() + LAST_CHUNK - 1) / LAST_CHUNK)
+                                + " 批成功）：" + batchErr);
+                    }
+
+                    for (Core.Dev d : devs) {
                         String key = accName + "|" + d.no;
                         DevState st = new DevState();
                         st.acc = accName;
                         st.no = d.no;
                         st.name = d.name;
-                        try {
-                            DevData dd = Core.fetchDeviceDataQuiet(tok, d.no);
-                            st.status = judge(dd, staleMinutes);
+
+                        DevState old;
+                        synchronized (states) {
+                            old = states.get(key);
+                        }
+                        st.prevStatus = old == null ? null : old.status;
+
+                        String err = errByDev.get(d.no);
+                        if (err == null && batchErr != null) err = batchErr;
+
+                        if (err == null) {
+                            DevData dd = Core.dataFrom(d.no, ptsByDev.get(d.no), lastByKey);
+                            boolean platOnline = "1".equals(d.online);
+                            st.status = judge(dd, staleMinutes, platOnline);
                             st.ageMin = dd.ageMinutes();
                             st.rows = dd.rows;
                             st.dataTime = newestTime(dd);
+                            if (platOnline && "blank".equals(st.status)) {
+                                /* 平台说设备在线，我们却一条数值都没读到：
+                                   多半是刚上报还没同步，或者这一台没赶上批量。
+                                   如实说明，别让用户以为是站点掉线。 */
+                                st.note = "平台显示在线，这次没读到数值（可能刚上报）";
+                            }
                             // 巡检结果落盘，供「历史数据」页读本地记录
                             if (!dd.rows.isEmpty()) {
                                 Hist.record(accName, d.no, d.name, dd.rows);
                             }
-                        } catch (Exception e) {
-                            st.status = "blank";
-                            st.dataTime = "--";
+                        } else {
+                            /* 【v0.38 修订】取不到 ≠ 设备离线。
+                               有上一轮数据就原样保留（状态、行、数据时间都不动），只在旁边
+                               写清「这轮没取到」和原因；没有上一轮才落到「采集异常」。 */
+                            if (old != null && !old.rows.isEmpty()) {
+                                st.status = old.status;
+                                st.ageMin = old.ageMin;
+                                st.rows = old.rows;
+                                st.dataTime = old.dataTime;
+                                st.note = "这轮没取到（" + err + "），下面是 "
+                                        + old.dataTime + " 的数据";
+                            } else {
+                                st.status = "blank";
+                                st.ageMin = -1;
+                                st.dataTime = "--";
+                                st.note = "这轮没取到：" + err;
+                            }
+                            st.fresh = false;
                         }
                         st.updatedAt = System.currentTimeMillis();
 
-                        DevState old = null;
                         synchronized (states) {
-                            old = states.get(key);
-                            st.prevStatus = old == null ? null : old.status;
                             states.put(key, st);
                         }
 
@@ -983,6 +1082,10 @@ public class Watch {
                         else if ("offline".equals(st.status)) devOff++;
                         else devBlank++;
 
+                        /* 【v0.38 修订】这一轮没取到数据的设备（fresh=false）不参与提醒判定。
+                           它的状态是从上一轮沿用下来的，拿旧状态报警等于把「平台限流」
+                           说成「站点坏了」—— 用户只会被假警报赶去现场。 */
+                        if (st.fresh) {
                         // 规则匹配
                         /* 【v0.18】covered 记录这台设备有没有被任一规则命中。
                            循环结束后用它判断「异常但无人管」，
@@ -1036,6 +1139,7 @@ public class Watch {
                            只会以为提醒功能坏了。 */
                         if (!covered && !"online".equals(st.status)) {
                             markUncovered(accName, st.status);
+                        }
                         }
                         done++;
                         /* 进度上报：每查完一台刷新一次，用户能看见在动 */
@@ -1093,6 +1197,18 @@ public class Watch {
 
     /** 与 DevData.judgeStatus 相同，但阈值可按规则覆盖。 */
     private static String judge(DevData dd, int staleMinutes) {
+        return judge(dd, staleMinutes, false);
+    }
+
+    /**
+     * 判定这一轮的状态。
+     *
+     * @param platOnline 平台自己标的在线状态（设备列表的 onlineOffline=="1"）。
+     *   平台说在线、我们却一条数值都没读到 —— 这是「采集异常」，不是「离线」。
+     *   原来的实现一律返回 offline，用户看到小程序里明明有数、监控页却报离线，
+     *   只能以为软件坏了或者站点掉了。
+     */
+    private static String judge(DevData dd, int staleMinutes, boolean platOnline) {
         if (dd.rows.isEmpty()) return "blank";
         boolean hasVal = false;
         long newest = -1;
@@ -1110,9 +1226,17 @@ public class Watch {
                 }
             }
         }
-        if (!hasVal || newest < 0) return "offline";
+        if (!hasVal || newest < 0) return platOnline ? "blank" : "offline";
         double ageMin = (System.currentTimeMillis() - newest) / 60000.0;
         return ageMin <= staleMinutes ? "online" : "stale";
+    }
+
+    /** 把异常翻成一句能显示在界面上的话。 */
+    private static String msgOf(Throwable t) {
+        if (t == null) return "读取失败";
+        String m = t.getMessage();
+        if (m == null || m.trim().isEmpty()) m = t.getClass().getSimpleName();
+        return m.trim();
     }
 
     private static String newestTime(DevData dd) {

@@ -230,6 +230,15 @@ function patchDevList() {
       var tx = '数据时间 ' + String(d.data_time).replace('T', ' ').slice(5, 16);
       if (msg.textContent !== tx) msg.textContent = tx;
     }
+    /* 【v0.38 修订】「这轮没取到」这类说明变了就重画这一块的展开区。
+       不重画的话，用户看到的是上一轮的「离线 / 数据时间」，而后端已经知道原因了。 */
+    var vbox = row.querySelector('.vars');
+    if (vbox && (vbox.getAttribute('data-note') || '') !== (d.note || '')) {
+      clearVars(row);
+      /* 标记成「已经跟上这一轮」：收起状态下不重画，但别每次轮询都白清一遍 */
+      vbox.setAttribute('data-note', d.note || '');
+      if (openDev[d.no]) fillVars(row);
+    }
   }
 }
 
@@ -386,6 +395,11 @@ function varsBody(d) {
     msgTxt = (d.data_time && d.data_time !== '--')
       ? '数据时间 ' + String(d.data_time).replace('T', ' ').slice(5, 16) : '';
   }
+  /* 【v0.38 修订】后端这轮没取到数据时会给一句 note（限流/权限/网络）。
+     必须画出来：否则用户看到的就是「离线 + 所有变量是 -」，
+     而小程序里明明有数 —— 只能得出「软件坏了」或「站点掉了」。
+     刷新中不显示（那期间上面的文案已经是进度）。 */
+  var noteTxt = (!rf && d.note) ? String(d.note) : '';
   return '<div class="row" style="margin:2px 0 6px">' +
     /* 【v0.32】「刷新这台」从展开区左下挪到右上：展开后第一眼就看到，
        不用穿过整张变量表滚到底才找得到。数据时间留在按钮左边同排。
@@ -395,6 +409,8 @@ function varsBody(d) {
     '<button class="sm" data-dvrf="' + esc(d.no) + '" data-dvacc="' + esc(d.acc) + '"' +
     (rf ? ' disabled' : '') + '>' +
     (rf ? '刷新中…' : '⟳ 刷新这台') + '</button></div>' +
+    (noteTxt ? '<div class="tiny" data-dvnote="' + esc(d.no) + '"' +
+      ' style="color:#d98a00;margin:0 0 6px;line-height:1.45">' + esc(noteTxt) + '</div>' : '') +
     rowsTable(d.rows, d);
 }
 
@@ -409,6 +425,8 @@ function fillVars(row) {
   if (!d) return;
   v.innerHTML = varsBody(d);
   v.setAttribute('data-filled', '1');
+  /* 记下这次画的是哪句 note：软刷新时拿它比对，变了才重画，见 patchDevList */
+  v.setAttribute('data-note', d.note || '');
 }
 
 /* 收起时把展开区清空。
@@ -1077,12 +1095,24 @@ function applyVarRefreshed(no, device, varName, btn) {
     toast('这次的数据里没有「' + varName + '」');
     return;
   }
+  /* 【v0.38 修订】值为空时别说「已刷新」。
+     平台限流/没权限时接口照样返回成功，只是没给值 ——
+     原来这里一律弹「已刷新」，用户看到的就是「提示刷新成功，值还是 -」，
+     只能认为软件在骗人。现在如实说，并且不拿 "-" 覆盖掉原来的值。 */
+  var val = String(hit[1] == null ? '' : hit[1]);
+  var empty = (val === '' || val === '-');
   /* 写回内存：下次整页/软刷新重绘时不会跳回旧值 */
   var dv = (G.ws && G.ws.devices) || [];
   for (var j = 0; j < dv.length; j++) {
     if (dv[j].no === device.no && (dv[j].acc || '') === (device.acc || '')) {
       dv[j] = device; break;
     }
+  }
+  if (empty) {
+    applyRefreshedDev(device, no);
+    toast('「' + varName + '」这次没取到数值' +
+      (device.note ? '：' + device.note : '（平台没返回）'));
+    return;
   }
   /* 就地更新 DOM：值 + 时间。textContent 赋值自带转义，不用 esc。 */
   var tr = btn ? btn.closest('tr') : null;
@@ -1216,6 +1246,19 @@ function applyRefreshedDev(dev, no) {
   var cnt = el('dvCnt');
   if (cnt) cnt.textContent = filteredDevs().length + ' 台';
   refreshStatBar();
+  /* 【v0.38 修订】一个数值都没拿到时，别弹「已刷新」。
+     平台限流/没权限时接口是成功的，只是没给值 —— 说「已刷新」等于骗人。 */
+  var rows = dev.rows || [];
+  var anyVal = false;
+  for (var k = 0; k < rows.length; k++) {
+    var v = String(rows[k][1] == null ? '' : rows[k][1]);
+    if (v !== '' && v !== '-') { anyVal = true; break; }
+  }
+  if (!anyVal) {
+    toast('已刷新「' + (dev.name || no) + '」，但平台没返回数值' +
+      (dev.note ? '：' + dev.note : ''));
+    return;
+  }
   toast('已刷新「' + (dev.name || no) + '」');
 }
 
