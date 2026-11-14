@@ -44,7 +44,7 @@ public class Core {
        改一处两边同时生效。 */
     public static volatile int STALE_MINUTES = 15;
     public static final int MAX_CARDS = 10;
-    public static final String APP_VERSION = "0.38";
+    public static final String APP_VERSION = "0.39";
     /* 【v0.36 修订五】打包时刻（build.gradle 注入）。
        版本号不动，光看 v0.36 分不清装的是哪一次打包的包，这个问题页面上要能看出来。 */
     public static final String BUILD_STAMP = BuildConfig.BUILD_STAMP;
@@ -121,6 +121,12 @@ public class Core {
     public static volatile String stage = "";
     public static volatile String error = null;
     public static volatile boolean finished = false;
+    /* 【v0.38h】上一轮跑完的时刻（毫秒时间戳）。
+       巡站进度和完成提示要写「什么时候跑完的」，不能用前端轮询到完成的
+       时刻凑数 —— 那最多能差一个轮询周期，而且是推断值不是实测值。
+       在 abortRun / runPatrol 的 finally 里赋值，status 和 result 都带出去；
+       result 会落盘，重启 app 后前端从 localStorage 还读得到。 */
+    public static volatile long finishedAt = 0;
     public static volatile int doneCount = 0;
     public static volatile int onlineCount = 0;
     public static volatile int totalCount = 0;
@@ -176,6 +182,13 @@ public class Core {
         /* 【v0.38b】这一张为什么是这个状态。空 = 正常读到。
            有值时前端在站名下面多显示一行，不必再让用户去翻日志猜。 */
         public String note;
+        /* 【v0.38f】这台站截图里的变量值，JSON 数组字符串：
+             [[变量名, 当前值, 数据时间, 元信息], ...]
+           复用 Watch.rowsJson（和监控页实时表同一份排序、同一份数值），
+           前端的「自定义筛选」拿它做「回水温度 < 30」这类比较。
+           存字符串而不是 JSONArray：snapshotResults() 深拷贝补跑底稿时
+           字符串天然不可变，不会两轮结果共用同一个可变对象。 */
+        public String rows = "";
     }
 
     public static void init(Context c) {
@@ -1498,6 +1511,7 @@ public class Core {
         ri.path = out.getAbsolutePath();
         ri.pubPath = pub;
         ri.note = note;
+        ri.rows = Watch.rowsJson(data.rows).toString();
 
         /* 就地替换结果里的那一项：不动列表范围、不动别的站点。
            列表里没有这台（比如从别处进来）就追加。 */
@@ -1529,6 +1543,10 @@ public class Core {
         o.put("note", ri.note);
         o.put("path", ri.path);
         o.put("pub", ri.pubPath == null ? JSONObject.NULL : ri.pubPath);
+        /* 单张重拍后前端会就地替换结果项，变量值也要一起换，
+           否则自定义筛选还在拿旧图的温度判断这台站。 */
+        o.put("rows", ri.rows == null || ri.rows.isEmpty()
+                ? new JSONArray() : new JSONArray(ri.rows));
         return o;
     }
 
@@ -1648,6 +1666,7 @@ public class Core {
         c.path = it.path;
         c.pubPath = it.pubPath;
         c.note = it.note;
+        c.rows = it.rows;
         return c;
     }
 
@@ -1725,6 +1744,7 @@ public class Core {
         log("✗ " + msg);
         running = false;
         finished = true;
+        finishedAt = System.currentTimeMillis();
         stage = "";
     }
 
@@ -1988,6 +2008,7 @@ public class Core {
                                     ri.path = path;
                                     ri.pubPath = pub;
                                     ri.note = note;
+                                    ri.rows = Watch.rowsJson(data.rows).toString();
                                     ar.report.add(ri);
                                 }
                                 log("[" + facc + "][w" + wi + "] (" + (idx + 1) + "/" + total
@@ -2117,6 +2138,7 @@ public class Core {
             if (myRun == runSeq) {
                 running = false;
                 finished = true;
+                finishedAt = System.currentTimeMillis();
                 stage = "";
             }
         }

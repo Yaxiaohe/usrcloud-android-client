@@ -1021,6 +1021,8 @@ public class MainActivity extends Activity {
                 o.put("error", Core.error == null ? JSONObject.NULL : Core.error);
                 o.put("online", Core.onlineCount);
                 o.put("finished", Core.finished);
+                /* 【v0.38h】跑完的时刻，进度卡和完成提示都用它，不用前端猜 */
+                o.put("finished_at", Core.finishedAt);
                 /* 【v0.31 修订】本轮编号，前端用它认「这份状态是不是本轮的」 */
                 o.put("run_id", Core.runSeq);
                 o.put("zip", Core.zipName == null ? JSONObject.NULL : Core.zipName);
@@ -1029,6 +1031,9 @@ public class MainActivity extends Activity {
             case "result": {
                 JSONObject o = new JSONObject();
                 o.put("ok", true);
+                /* 【v0.38h】随结果一起落盘：重启 app 后 status 内存态没了，
+                   前端仍能从 localStorage 里读出上次是什么时候跑完的。 */
+                o.put("finished_at", Core.finishedAt);
                 JSONObject rs = new JSONObject();
                 synchronized (Core.LOCK) {
                     for (Map.Entry<String, Core.AccountResult> e : Core.results.entrySet()) {
@@ -1059,6 +1064,12 @@ public class MainActivity extends Activity {
                             io.put("preview", it.preview);
                             io.put("note", it.note == null ? "" : it.note);
                             io.put("path", it.path);
+                            /* 【v0.38f】变量值给前端做自定义筛选（回水温度 < 30 之类）。
+                               和监控页实时表共用 Watch.rowsJson 的格式：
+                               [变量名, 当前值, 数据时间, 元信息]。
+                               没有数值的旧结果给空数组，前端按「不满足条件」处理。 */
+                            io.put("rows", it.rows == null || it.rows.isEmpty()
+                                    ? new JSONArray() : new JSONArray(it.rows));
                             io.put("pub", it.pubPath == null ? JSONObject.NULL : it.pubPath);
                             rep.put(io);
                         }

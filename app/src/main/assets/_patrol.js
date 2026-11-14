@@ -5,6 +5,127 @@ var lastResult = null;
    用户搜着「站点E」补跑两台，回来不该又变成全量列表。 */
 var kwPatrol = '';
 
+/* ---------- 巡站结果筛选（v0.38f） ----------
+ *
+ * 用户要求：巡站页顶部加一排仪表（总数 / 在线 / 离线(无数据) / 自定义），
+ * 点一下就按这个口径筛下方结果列表；「自定义」长按可以配置变量条件
+ * （回水温度 < 30、进水温度 > 40 这种），支持多条。
+ *
+ * 口径只有一份，四个地方共用：
+ *   filterPatrol() 决定谁显示、仪表数字、结果卡计数
+ *   visiblePatrolRows() 决定大图弹窗的翻页序列
+ *   filteredShotPaths() 决定导出弹窗列哪些图
+ *   patrolRowItem() 从行 DOM 找回结果项
+ * 不许任何一处另写一套「是不是有数据」，否则按钮写 3 台、导出却是 5 张。
+ */
+var ptFilter = 'all';               // all | online | bad | custom
+var CUSTOM_KEY = 'xunjian.customFilter.v1';
+var lpAt = 0;                       // 长按触发的时刻，用来吞掉随后那一下 click
+
+function loadCustomCfg() {
+  try {
+    var c = JSON.parse(localStorage.getItem(CUSTOM_KEY) || 'null');
+    if (!c || !c.rules) return { rules: [], mode: 'all' };
+    return { rules: c.rules || [], mode: c.mode === 'any' ? 'any' : 'all' };
+  } catch (e) {
+    return { rules: [], mode: 'all' };
+  }
+}
+function saveCustomCfg(c) {
+  try { localStorage.setItem(CUSTOM_KEY, JSON.stringify(c)); } catch (e) { }
+}
+
+/* 有数据 / 没数据。与 emptyStat()（补跑按钮）、后端只跑没数据的口径一致：
+   online 有值、stale 只是旧，都算有数据；其余算没取到。 */
+function patrolHasData(it) {
+  var s = it && it.status;
+  return s === 'online' || s === 'stale';
+}
+
+/* 每行的稳定身份 data-ref="账号|下标"。
+   data-shot 只有真截到图的行才有，筛选和计数不能靠它 ——
+   离线的行恰恰是最需要被筛出来的那批。 */
+function patrolRowItem(n) {
+  var v = n && n.getAttribute('data-ref');
+  if (!v || !lastResult || !lastResult.results) return null;
+  var i = v.lastIndexOf('|');
+  if (i < 0) return null;
+  var a = lastResult.results[v.slice(0, i)];
+  if (!a || !a.report) return null;
+  return a.report[parseInt(v.slice(i + 1), 10)] || null;
+}
+
+/* 当前真正看得见的结果行，顺序就是列表从上到下的顺序。
+   整张账号卡被收起时，里面行自己的 display 还是 ''，
+   必须连父卡一起判，否则「下一张」会翻到一张用户看不见的图。 */
+function visiblePatrolRows() {
+  var main = el('main');
+  if (!main) return [];
+  var out = [];
+  main.querySelectorAll('.ri[data-q]').forEach(function (n) {
+    if (n.style.display === 'none') return;
+    var c = n.closest ? n.closest('.card') : null;
+    if (c && c.style.display === 'none') return;
+    out.push(n);
+  });
+  return out;
+}
+
+/* 截图里的变量值是 "45.2℃" / "320.5kpa" / "-" 这种串。
+   只取开头的数字比较，剩下的当单位留着显示给用户。 */
+function varNum(raw) {
+  var m = /^\s*(-?\d+(?:\.\d+)?)\s*(.*)$/.exec(String(raw == null ? '' : raw));
+  if (!m) return null;
+  return { v: parseFloat(m[1]), u: m[2].trim() };
+}
+
+function customHitOne(it, rule) {
+  var rows = (it && it.rows) || [];
+  var name = String(rule.name || '').trim();
+  var target = parseFloat(rule.num);
+  if (!name || !isFinite(target)) return false;
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    if (!r || !r[0] || String(r[0]).indexOf(name) < 0) continue;
+    var x = varNum(r[1]);
+    if (!x) continue;
+    var v = x.v, ok = false;
+    switch (rule.op) {
+      case 'gt': ok = v > target; break;
+      case 'lt': ok = v < target; break;
+      case 'ge': ok = v >= target; break;
+      case 'le': ok = v <= target; break;
+      default:   ok = (v === target); break;
+    }
+    if (ok) return true;
+  }
+  return false;
+}
+
+function customMatch(it, cfg) {
+  var rules = (cfg && cfg.rules) || [];
+  if (!rules.length) return false;
+  var res = rules.map(function (r) { return customHitOne(it, r); });
+  return cfg.mode === 'any' ? res.indexOf(true) >= 0 : res.every(Boolean);
+}
+
+/* 导出图片只列当前筛选后还看得见的那几张。
+   弹窗里根本不出现被筛掉的图，「勾选未导出」自然也不会勾到它们 ——
+   这比在勾选时再排一遍可靠，勾选状态只有一个来源。 */
+function filteredShotPaths(r) {
+  var main = el('main');
+  var rows = main ? main.querySelectorAll('.ri[data-q]') : null;
+  if (!rows || !rows.length) return collectShotPaths(r);
+  var out = [], seen = {};
+  visiblePatrolRows().forEach(function (n) {
+    var it = patrolRowItem(n);
+    if (!it) return;
+    var p = it.pub || it.path;
+    if (p && !seen[p]) { seen[p] = 1; out.push(p); }
+  });
+  return out;
+}
+
 /* 收集本次巡站所有截图路径，优先对外目录那份（用户能看到、能分享） */
 function collectShotPaths(r) {
   var out = [], seen = {};
@@ -51,8 +172,11 @@ function saveExported(m) {
 
 function exportImages() {
   var r = api('result', {});
-  var paths = collectShotPaths(r);
-  if (!paths.length) { toast('还没有截图，先跑一次巡站'); return; }
+  var paths = filteredShotPaths(r);
+  if (!paths.length) {
+    toast('当前筛选下没有可导出的图片；点「显示全部」可以导出全部');
+    return;
+  }
   openShotPicker(paths);
 }
 
@@ -259,7 +383,13 @@ function V_patrol() {
   if (G.tab !== 'patrol') return;
   var h = G.health || {};
   var accs = G.accounts.filter(function (a) { return a.enabled; });
-var allOn = accs.length > 0 && accs.every(function (a) { return G.picked[a.name]; });
+  var allOn = accs.length > 0 && accs.every(function (a) { return G.picked[a.name]; });
+  /* 【v0.38g】结果必须在拼 HTML **之前** 就加载好。
+     原来 loadResult() 放在结果卡那一段才调，可「只跑没数据的 N 台」按钮
+     在更前面的控制区就要读 lastResult —— 首次进页面时它是空的，
+     于是列表有了、按钮却没有，要等下一次重绘才冒出来。
+     两处现在用同一份数据，首屏就一致。 */
+  loadResult();
   var s = '';
 
   /* 账号选择 */
@@ -273,23 +403,25 @@ var allOn = accs.length > 0 && accs.every(function (a) { return G.picked[a.name]
   if (!G.accounts.length) {
     s += '<div class="empty">还没有账号<br><span class="tiny">去「我的」页添加</span></div>';
   } else {
+    /* 【v0.38f】半宽两列：四个账号原来竖着占四行，把进度和按钮全顶下去了。
+       格子里的文字区必须带 min-width:0，否则长手机号会把另一列撑出屏幕。 */
+    s += '<div class="accgrid">';
     G.accounts.forEach(function (a) {
       var on = !!G.picked[a.name];
       var kw = (a.station_kw || []).join('、');
       s += '<div class="item' + (on ? ' on' : '') + '" data-acc="' + esc(a.name) + '">' +
         '<div class="row"><div class="chk' + (on ? ' on' : '') + '">✓</div>' +
-        '<div style="flex:1"><div class="t">' + esc(a.name) + '</div>' +
-        '<div class="s mono">' + esc(a.account) +
-        (kw ? ' · 过滤' + kw.split('、').length + '站' : '') + '</div></div>' +
+        '<div style="flex:1;min-width:0"><div class="t">' + esc(a.name) + '</div>' +
+        '<div class="s mono">' + esc(a.account) + '</div>' +
+        /* 半宽格子放不下「手机号 · 过滤3站」一整行，硬塞会被省略号吃掉后半句。
+           过滤站数单独一行，两个数都看得全。 */
+        (kw ? '<div class="s" style="margin-top:1px;font-size:10px;color:#2b62e0">' +
+          '过滤 ' + kw.split('、').length + ' 站</div>' : '') + '</div>' +
         (a.enabled ? '' : '<span class="pill gray">停用</span>') + '</div></div>';
     });
+    s += '</div>';
   }
   s += '</div>';
-
-  /* 进度：放在账号和「开始巡站」之间。
-     巡站时用户盯着的是「跑到第几台了」，紧挨着账号选择和开始按钮才顺手；
-     放在结果卡上面的话，页面一长进度条就被顶到看不见的地方了。 */
-  s += '<div class="card" id="progCard"><h2>巡站进度</h2><div id="progBox"></div></div>';
 
   /* 控制区 */
   s += '<div class="card">' +
@@ -308,11 +440,45 @@ var allOn = accs.length > 0 && accs.every(function (a) { return G.picked[a.name]
        所以这里只剩「清理往期」，单独占一行。 */
     '<button class="sm blk" id="btnClean" style="margin-top:10px">清理往期</button></div>';
 
-  /* 截图保存位置：放在控制区下面。
-     放页面最上方时，用户一进来先看到一长串路径，
-     真正要做的「选账号 → 开始巡站」被挤到下面去了。
-     而这个信息是「跑完之后去哪儿找」才关心的，放开始按钮下面更贴使用顺序。
-     路径本身照旧原样显示（用户要照着它去文件管理器找），只是换位置。 */
+  /* 【v0.38g】巡站进度：放在控制区下面、保存路径提示上面。
+     原来夹在账号和「开始巡站」之间，把按钮顶到第二屏；
+     现在点完开始，往下一眼就看到跑到第几台了。 */
+  s += '<div class="card" id="progCard"><h2>巡站进度</h2><div id="progBox"></div></div>';
+
+  /* 【v0.38g】统计仪表：放在结果卡正上方。
+     首版插在账号下面，点完「在线」还要往下滚一屏才看得到筛出来的列表，
+     用户反馈「仪表离结果太远」。现在和搜索框、结果卡连成一片，点完立刻见效。
+     数字是**全部站点**里各分类的台数，不受搜索词影响 —— 这样和监控页
+     顶部那排统计的语义一致，也保证「总数 = 在线 + 离线(无数据)」当场能验算。
+     搜索词是另一个独立的收窄条件，结果卡里会写清「搜 X · 在线」。 */
+  s += '<div class="card" style="padding:12px 10px">' +
+    '<div class="stat" id="ptStat" style="margin:0;padding:2px 0;background:transparent;box-shadow:none">' +
+    '<div data-st="all"><b id="stAll">0</b><span>总数</span></div>' +
+    '<div data-st="online"><b id="stOn" class="cg">0</b><span>在线</span></div>' +
+    '<div data-st="bad"><b id="stBad" class="cr">0</b><span>离线(无数据)</span></div>' +
+    '<div data-st="custom"><b id="stCus" class="cb">—</b><span>自定义</span></div>' +
+    '</div>' +
+    '<div class="row" style="margin-top:9px;gap:6px">' +
+    '<span class="muted tiny" style="flex:1;min-width:0">点数字筛下方列表；长按「自定义」配条件</span>' +
+    '<button class="sm" id="btnCusCfg">设置条件</button>' +
+    '</div></div>';
+
+  /* 结果
+   * 【v0.22 修问题 5】原来只存在内存变量 lastResult 里，
+   * 一按手机返回键切走、app 被系统回收内存，重新打开就是空的 ——
+   * 用户描述是「回到桌面，再点开巡站页正常，但站点信息没了，也就没了看截图的入口」。
+   * 后端其实有 status 接口能给出上次的巡站结果（result 也在后端存着），
+   * 但前端只在巡检刚结束时才读一次，页面重建时没重新取。
+   * 现在两处都补上：进页面先从后端拉一次，
+   * 再把结果落到 localStorage 兜底（后端结果被清或读失败时仍有）。
+   * 【v0.38g】加载动作已提到 V_patrol() 开头（见那里），这里只负责渲染。 */
+  if (lastResult) s += resultHtml(lastResult);
+
+  /* 【v0.38h】截图保存位置挪到整页最下面。
+     原来夹在「巡站进度」和「仪表」之间，点完开始要往下滚过一长串路径、
+     还可能有权限说明，才看得到仪表和结果。这信息只有「跑完去哪儿找图」
+     的时候才用得上，放结果列表之后最不挡事。
+     路径本身一字不改 —— 用户还要照着它去文件管理器找截图。 */
   var allFiles = h.allFiles !== false;
   s += '<div class="bar" id="dirbar">📁 截图保存到<br>' +
     '<span class="mono tiny">' + esc(h.saveDir || '...') + '</span><br>' +
@@ -338,16 +504,6 @@ var allOn = accs.length > 0 && accs.every(function (a) { return G.picked[a.name]
       '<button class="blk" id="btnAsk">开启「所有文件访问」（可选）</button></div>';
   }
 
-  /* 结果
-   * 【v0.22 修问题 5】原来只存在内存变量 lastResult 里，
-   * 一按手机返回键切走、app 被系统回收内存，重新打开就是空的 ——
-   * 用户描述是「回到桌面，再点开巡站页正常，但站点信息没了，也就没了看截图的入口」。
-   * 后端其实有 status 接口能给出上次的巡站结果（result 也在后端存着），
-   * 但前端只在巡检刚结束时才读一次，页面重建时没重新取。
-   * 现在两处都补上：进页面先从后端拉一次，
-   * 再把结果落到 localStorage 兜底（后端结果被清或读失败时仍有）。 */
-  loadResult();
-  if (lastResult) s += resultHtml(lastResult);
   el('main').innerHTML = s;
   bindPatrol();
   bindResult();
@@ -389,6 +545,36 @@ function saveResult(r) {
 
 function bindPatrol() {
   var m = el('main');
+
+  /* 【v0.38f】仪表：短按切筛选，长按「自定义」配条件，另有「设置条件」兜底。
+     长按是用户点名要的，但真机上不好发现，所以同时给一个显式按钮。
+     【v0.38g】按钮改回软件标准的 .sm 尺寸（原来内联缩小成小胶囊、还带 ⚙，
+     和「全选 / 显示全部」这些按钮放一起明显不是一套东西）。 */
+  var stat = el('ptStat');
+  if (stat) stat.querySelectorAll('[data-st]').forEach(function (n) {
+    var key = n.getAttribute('data-st');
+    n.onclick = function () {
+      /* 长按刚弹过配置窗，随后那一下 click 不能再把筛选切走 */
+      if (Date.now() - lpAt < 1200) return;
+      if (key === 'custom' && !loadCustomCfg().rules.length) {
+        openCustomFilter();
+        return;
+      }
+      ptFilter = key;
+      filterPatrol();
+    };
+    if (key === 'custom') bindLongPress(n);
+  });
+  var cfgBtn = el('btnCusCfg');
+  if (cfgBtn) cfgBtn.onclick = openCustomFilter;
+  var clr = el('ptFilClear');
+  if (clr) clr.onclick = function () {
+    kwPatrol = '';
+    ptFilter = 'all';
+    var se = el('pSearch');
+    if (se) se.value = '';
+    filterPatrol();
+  };
 
   var ab = el('btnAsk');
   if (ab) ab.onclick = function () {
@@ -495,6 +681,22 @@ function bindPatrol() {
 
 /* ---------- 进度 ---------- */
 var stTid = null;
+
+/* 【v0.38h】把后端给的完成时刻写成「11-14 15:57」。
+   时间来自 Core.finishedAt（任务真正收尾那一刻），不是前端轮询到 finished 的时刻。
+   没有时间戳（老结果 / 还没跑过）就返回空串，界面只写「已完成」，不编一个时间。 */
+function finishTimeText(ms) {
+  if (!ms || !isFinite(ms)) return '';
+  var d = new Date(Number(ms));
+  if (isNaN(d.getTime())) return '';
+  var p = function (n) { return (n < 10 ? '0' : '') + n; };
+  return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
+    p(d.getHours()) + ':' + p(d.getMinutes());
+}
+function lastFinishAt() {
+  var r = G.st || {};
+  return r.finished_at || (lastResult && lastResult.finished_at) || 0;
+}
 function pollStatus() {
   if (stTid) clearInterval(stTid);
   step();
@@ -539,9 +741,12 @@ function step() {
        直接把原因说给用户听。 */
     /* 【v0.38c】补跑只说这轮的结果：整份列表里的「在线台数」是上一轮全跑出来的，
        直接报总数会让人以为补跑把全部站点又跑了一遍。 */
+    /* 【v0.38h】完成提示带上真正跑完的时刻，事后回来看也知道这批图是哪一轮的。 */
+    var ft = finishTimeText(lastFinishAt());
+    var tail = ft ? '（' + ft + '）' : '';
     if (r.error) toast(r.error);
-    else if (wasRetry) toast('补跑完成，本轮在线 ' + (r.online || 0) + ' 台');
-    else toast('巡站完成，在线 ' + (r.online || 0) + ' 台');
+    else if (wasRetry) toast('补跑完成，本轮在线 ' + (r.online || 0) + ' 台' + tail);
+    else toast('巡站完成，在线 ' + (r.online || 0) + ' 台' + tail);
   }}
 
 function paintProg() {
@@ -575,6 +780,10 @@ function paintProg() {
     } else {
       h += '<div class="row"><span class="pill b">已完成</span><span class="sp"></span>' +
         '<span class="muted tiny">在线 ' + (r.online || 0) + ' 台</span></div>';
+      /* 【v0.38h】执行完毕的时间单独一行，不跟「在线 N 台」挤在一起。
+         老结果没有时间戳时只写「已完成」，不编一个时间出来。 */
+      var ft = finishTimeText(lastFinishAt());
+      if (ft) h += '<div class="muted tiny" style="margin-top:6px">完成于 ' + ft + '</div>';
     }
   } else {
     h += '<div class="empty">尚未开始</div>';
@@ -598,6 +807,12 @@ function resultHtml(r) {
     '<span class="r" id="ptCnt">' + total + ' 台</span></h2>' +
     '<input id="pSearch" placeholder="搜索站名或编号" value="' + esc(kwPatrol) +
     '" autocomplete="off">' +
+    /* 【v0.38f】当前生效的筛选条件写在这里。
+       仪表在页面最上面，用户点完往下滚到结果时，得能一眼看出
+       「为什么只剩 12 台」，而不是以为数据丢了。 */
+    '<div class="row" style="margin-top:8px;gap:6px">' +
+    '<span class="muted tiny" id="ptFilNow" style="flex:1;min-width:0"></span>' +
+    '<button class="sm" id="ptFilClear" style="display:none">显示全部</button></div>' +
     '<div class="muted tiny" id="ptEmpty" style="display:none;margin-top:8px"></div></div>';
   names.forEach(function (n) {
     var a = r.results[n];
@@ -637,7 +852,10 @@ function resultHtml(r) {
            过滤靠改 display，不重建 DOM —— 行里的 data-shot 带着序号，
            重建会让序号和 lastResult.report 对不上，点开就是别人的图。 */
         var q = ((it.device || '') + ' ' + (it.no || '')).toLowerCase();
+        /* data-ref 是每行的稳定身份：筛选计数、大图翻页、导出取图都按它取回结果项。
+           data-shot 继续只给「真有图」的行，点击绑定沿用，不动那套逻辑。 */
         return '<div class="ri' + (shot ? ' has' : '') + '" data-q="' + esc(q) + '"' +
+          ' data-ref="' + esc(n) + '|' + i + '"' +
           (shot ? ' data-shot="' + esc(n) + '|' + i + '"' : '') + '>' +
           '<div class="t">' + esc(it.device) +
           (note ? '<div class="tiny muted" style="margin-top:2px;font-weight:400">' +
@@ -654,9 +872,9 @@ function resultHtml(r) {
     h += '</div>';
   });
   if (r.zip) {
-    h += '<button class="pri blk" id="btnZip2">⬆　导出本次全部图片</button>' +
+    h += '<button class="pri blk" id="btnZip2">⬆　导出当前列表里的图片</button>' +
       '<div class="muted tiny" style="margin-top:7px;text-align:center">' +
-      '直接发图片给微信/QQ，不用再解压缩包</div>';
+      '只列筛选后还看得到的那些；直接发图片给微信/QQ，不用解压缩包</div>';
   }
   return h;
 }
@@ -709,6 +927,9 @@ function findShot(acc, idx) {
  * 「‹ 上一账号 / 下一账号 ›」，标题里也带上账号名，
  * 让人明确知道「已经切到另一个账号的卡片了」，而不是看串了。
  *
+ * 【v0.38f】序列进一步收窄为「当前筛选后可见的行」，顺序就是列表顺序。
+ * 跨账号连续仍然成立，但被搜索词或仪表筛掉的站不再混进「下一张」。
+ *
  * 【为什么序列只收有截图的行】
  * 失败/离线的行没截图，混进来「下一张」会跳到一张空图。
  *
@@ -719,24 +940,47 @@ function openShot(acc, idx) {
   var p = findShot(acc, idx);
   if (!p) { toast('这张没有截图'); return; }
 
-  /* 【v0.26】按 results 的键序（也就是结果卡片从上到下的顺序）
-     把所有账号下有截图的行串成一条切换序列。
-     每个条目记住自己属于哪个账号（acc），跨账号翻页时
-     按钮文字和标题都要用它。 */
+  /* 【v0.38f】切换序列 = 当前筛选后还看得见的行，按列表从上到下的顺序。
+     原来是把所有账号的有图行全串起来，用户筛完「在线 12 台」再点开一张，
+     「下一张」却翻到被筛掉的离线站 —— 等于筛选白做了。
+     visiblePatrolRows() 已经把整卡收起的情况算在内，这里不再另判一遍。 */
+  var main = el('main');
+  var hasList = !!(main && main.querySelectorAll('.ri[data-q]').length);
   var list = [];
-  var accs = Object.keys((lastResult && lastResult.results) || {});
-  for (var ai = 0; ai < accs.length; ai++) {
-    var accName = accs[ai];
-    var rep = (lastResult.results[accName] && lastResult.results[accName].report) || [];
-    for (var i = 0; i < rep.length; i++) {
-      if (rep[i] && (rep[i].pub || rep[i].path)) {
-        list.push({ it: rep[i], pos: i, acc: accName });
+  if (!hasList) {
+    /* 结果列表还没渲染（从别处直接调进来）时退回全量序列：
+       跨所有账号连续，保持 v0.26 以来的行为，不让弹窗只剩一张图。 */
+    var accs = Object.keys((lastResult && lastResult.results) || {});
+    for (var ai = 0; ai < accs.length; ai++) {
+      var accName = accs[ai];
+      var rep = (lastResult.results[accName] && lastResult.results[accName].report) || [];
+      for (var ri = 0; ri < rep.length; ri++) {
+        if (rep[ri] && (rep[ri].pub || rep[ri].path)) {
+          list.push({ it: rep[ri], pos: ri, acc: accName });
+        }
       }
     }
+  } else {
+    visiblePatrolRows().forEach(function (n) {
+      var it = patrolRowItem(n);
+      if (!it || !(it.pub || it.path)) return;
+      var v = n.getAttribute('data-ref');
+      var j = v.lastIndexOf('|');
+      list.push({ it: it, pos: parseInt(v.slice(j + 1), 10), acc: v.slice(0, j) });
+    });
   }
-  if (!list.length) {
-    list = [{ it: lastResult.results[acc].report[idx], pos: idx, acc: acc }];
+  /* 点开的这张不在筛选结果里（条件刚改过、或从别处调进来）时，
+     只显示这一张：用户明确点了它，不能悄悄换成序列里的第一张。 */
+  var inList = false;
+  for (var t = 0; t < list.length; t++) {
+    if (list[t].acc === acc && list[t].pos === idx) { inList = true; break; }
   }
+  if (!inList) {
+    var only = lastResult && lastResult.results && lastResult.results[acc]
+      && lastResult.results[acc].report && lastResult.results[acc].report[idx];
+    list = only ? [{ it: only, pos: idx, acc: acc }] : [];
+  }
+  if (!list.length) { toast('这张没有截图'); return; }
 
   /* 序列里是否存在多个账号 —— 决定标题要不要带账号名前缀。 */
   var multiAcc = false;
@@ -852,6 +1096,8 @@ function openShot(acc, idx) {
           it.path = p.path;
           it.pub = (p.pub === null || p.pub === undefined) ? '' : p.pub;
           it.device = p.device || it.device;
+          /* 变量值也要换，否则自定义筛选还在拿旧图的温度判断这台站 */
+          if (p.rows) it.rows = p.rows;
           saveResult(lastResult);     /* 连同落盘：关掉 app 再进来也是新图 */
           if (G.tab === 'patrol') V_patrol();   /* 列表上的胶囊/说明同步换掉 */
           paint();                     /* 弹窗里的图换成新这张 */
@@ -977,55 +1223,231 @@ function bindResult() {
   });
 }
 
-/* ---------- 结果列表搜索（v0.38d） ----------
+/* ---------- 结果列表筛选（v0.38f） ----------
  *
- * 用户要求：巡站页不要「选择站点」那个按钮 —— 它点开是设备勾选，
- * 勾完直接改账号的 station_kw（站点过滤），等于在巡站页悄悄改了账号配置。
- * 换成这里一个输入框，只模糊筛「结果列表」的显示，账号配置一概不动。
+ * 只改 display，不重建 DOM：每行带着 data-shot / data-ref 的序号，
+ * 重建会让序号前移，点「补水泵」打开「循环泵」的图 —— 真机上极难发现。
  *
- * 为什么用改 display 而不是重建列表：
- *   每行带着 data-shot="账号|序号"，序号是 lastResult.report 的下标。
- *   重建 DOM 时只要有一个账号被过滤掉一行，后面所有序号就会错位，
- *   点开「站点E」看到的是别人的图 —— 这种错位在真机上极难发现。
- *   所以只隐藏行，DOM 结构和序号一律不动。
+ * 两遍扫描：第一遍算属性 + 全量分类计数（仪表数字），
+ * 第二遍按「搜索词 ∩ 仪表条件」决定谁显示。
+ * 仪表数字只按全量算，所以「总数 = 在线 + 离线(无数据)」当场能验算。
  */
 function filterPatrol() {
   var main = el('main');
   if (!main) return;
   var q = (kwPatrol || '').trim().toLowerCase();
   var rows = main.querySelectorAll('.ri[data-q]');
-  var shown = 0;
+  if (!rows.length) return;
+
+  var cfg = loadCustomCfg();
+  var tAll = 0, tOn = 0, tBad = 0, tCus = 0;
   rows.forEach(function (n) {
-    var hit = !q || n.getAttribute('data-q').indexOf(q) >= 0;
-    n.style.display = hit ? '' : 'none';
-    if (hit) shown++;
+    var it = patrolRowItem(n);
+    var has = patrolHasData(it);
+    var cus = cfg.rules.length ? customMatch(it, cfg) : false;
+    n.setAttribute('data-byq',
+      (!q || n.getAttribute('data-q').indexOf(q) >= 0) ? '1' : '0');
+    n.setAttribute('data-has', has ? '1' : '0');
+    n.setAttribute('data-cus', cus ? '1' : '0');
+    tAll++;
+    if (has) tOn++; else tBad++;
+    if (cus) tCus++;
   });
 
-  /* 整张账号卡片都没有可见行时连卡片一起藏掉：
-     否则搜「站点E」会留下 3 个只剩标题的空白卡片，看着像加载失败。 */
+  var shown = 0;
+  rows.forEach(function (n) {
+    var ok = n.getAttribute('data-byq') === '1';
+    if (ok && ptFilter === 'online') ok = n.getAttribute('data-has') === '1';
+    else if (ok && ptFilter === 'bad') ok = n.getAttribute('data-has') === '0';
+    else if (ok && ptFilter === 'custom') ok = n.getAttribute('data-cus') === '1';
+    n.style.display = ok ? '' : 'none';
+    if (ok) shown++;
+  });
+
+  var sa = el('stAll'), so = el('stOn'), sb = el('stBad'), sc = el('stCus');
+  if (sa) sa.textContent = tAll;
+  if (so) so.textContent = tOn;
+  if (sb) sb.textContent = tBad;
+  if (sc) sc.textContent = cfg.rules.length ? tCus : '—';
+  /* 【v0.38h】「总数」是没筛的默认状态，不该给任何数字套蓝框 ——
+     套了会让人以为当前正用着某个筛选条件。监控页顶部那排统计也是不画框的。
+     点「在线 / 离线 / 自定义」之后才高亮当前项，好让用户知道列表为什么变短。 */
+  var stat = el('ptStat');
+  if (stat) stat.querySelectorAll('[data-st]').forEach(function (n) {
+    n.classList.toggle('on', ptFilter !== 'all' && n.getAttribute('data-st') === ptFilter);
+  });
+
+  /* 整张账号卡片都没有可见行时连卡片一起藏掉；标题台数跟着筛。 */
   main.querySelectorAll('.card').forEach(function (c) {
     var rs = c.querySelectorAll('.ri[data-q]');
     if (!rs.length) return;
     var vis = 0;
     rs.forEach(function (n) { if (n.style.display !== 'none') vis++; });
     c.style.display = vis ? '' : 'none';
-    /* 卡片标题的台数跟着筛：不跟就会出现「标题 22 台、列表 2 行」 */
     var cn = c.querySelector('[data-cnt]');
-    if (cn) cn.textContent = q ? (vis + ' / ' + rs.length + ' 台') : (rs.length + ' 台');
+    if (cn) cn.textContent = (vis !== rs.length)
+      ? (vis + ' / ' + rs.length + ' 台') : (rs.length + ' 台');
   });
 
+  var parts = [];
+  if (q) parts.push('搜「' + kwPatrol.trim() + '」');
+  if (ptFilter === 'online') parts.push('在线');
+  else if (ptFilter === 'bad') parts.push('离线(无数据)');
+  else if (ptFilter === 'custom') parts.push('自定义 ' + cfg.rules.length + ' 条');
+  var filtering = parts.length > 0;
+
   var cnt = el('ptCnt');
-  if (cnt) cnt.textContent = q ? (shown + ' / ' + rows.length + ' 台')
-                              : (rows.length + ' 台');
+  if (cnt) cnt.textContent = filtering
+    ? (shown + ' / ' + tAll + ' 台') : (tAll + ' 台');
   var ttl = el('ptTitle');
-  if (ttl) ttl.textContent = q ? ('巡站结果 · 搜「' + kwPatrol.trim() + '」') : '巡站结果';
+  if (ttl) ttl.textContent = '巡站结果';
+  var now = el('ptFilNow');
+  if (now) now.textContent = filtering
+    ? ('当前：' + parts.join(' · ') + ' → ' + shown + ' 台') : '当前：全部站点';
+  var clr = el('ptFilClear');
+  if (clr) clr.style.display = filtering ? '' : 'none';
   var empty = el('ptEmpty');
   if (empty) {
-    if (q && shown === 0) {
-      empty.textContent = '没有匹配「' + kwPatrol.trim() + '」的站点；清空输入框可看全部。';
+    if (filtering && shown === 0) {
+      empty.textContent = '没有匹配当前条件的站点（' + parts.join(' · ') +
+        '）；点「显示全部」或改条件。';
       empty.style.display = '';
     } else {
       empty.style.display = 'none';
     }
   }
+}
+
+/* 长按 600ms 打开条件配置。
+   长按触发后紧跟着会来一次 click，用 lpAt 把它吞掉；
+   不依赖「一定会来 click」，所以 1200ms 后自动失效，不会吞掉下一次短按。 */
+function bindLongPress(n) {
+  var tid = null;
+  function cancel() { if (tid) { clearTimeout(tid); tid = null; } }
+  function fire() { tid = null; lpAt = Date.now(); openCustomFilter(); }
+  n.addEventListener('touchstart', function () {
+    cancel(); tid = setTimeout(fire, 600);
+  }, { passive: true });
+  n.addEventListener('touchmove', cancel, { passive: true });
+  n.addEventListener('touchend', cancel, { passive: true });
+  n.addEventListener('touchcancel', cancel, { passive: true });
+  /* 鼠标长按：模拟器 / 接了鼠标的设备也能配条件 */
+  n.addEventListener('mousedown', function () {
+    cancel(); tid = setTimeout(fire, 600);
+  });
+  n.addEventListener('mouseup', cancel);
+  n.addEventListener('mouseleave', cancel);
+}
+
+var CF_OPS = [['lt', '小于'], ['le', '不大于'], ['gt', '大于'],
+              ['ge', '不小于'], ['eq', '等于']];
+
+/* 自定义筛选条件编辑窗。
+   条件可以加多条，选「全部满足」或「满足任一」；删光再保存 = 清空条件。
+   草稿在每次增删/保存前先从 DOM 读回来，否则加第二条会把第一条填的字冲掉。 */
+function openCustomFilter() {
+  var cfg = loadCustomCfg();
+  var draft = { rules: JSON.parse(JSON.stringify(cfg.rules || [])), mode: cfg.mode };
+  if (!draft.rules.length) draft.rules = [{ name: '', op: 'lt', num: '' }];
+
+  function syncDraft() {
+    var arr = [];
+    el('mbox').querySelectorAll('.cfr').forEach(function (row) {
+      arr.push({
+        name: (row.querySelector('[data-k="name"]') || {}).value || '',
+        op: (row.querySelector('[data-k="op"]') || {}).value || 'lt',
+        num: (row.querySelector('[data-k="num"]') || {}).value || ''
+      });
+    });
+    draft.rules = arr;
+  }
+
+  function ruleHtml(r, i) {
+    return '<div class="cfr" data-i="' + i + '">' +
+      '<input data-k="name" placeholder="变量名" autocomplete="off" value="' +
+        esc(r.name || '') + '">' +
+      '<select data-k="op">' + CF_OPS.map(function (o) {
+        return '<option value="' + o[0] + '"' + (r.op === o[0] ? ' selected' : '') +
+          '>' + o[1] + '</option>';
+      }).join('') + '</select>' +
+      '<input class="n" data-k="num" type="number" step="any" placeholder="数值" value="' +
+        esc(r.num || '') + '">' +
+      '<button class="sm" data-del="' + i + '">删</button></div>';
+  }
+
+  var html = '<div class="muted tiny" style="line-height:1.7;margin-bottom:10px">' +
+    '按截图里的变量数值筛站点。变量名支持模糊匹配，数值只比数字、单位自动忽略。' +
+    '例：回水温度 小于 30、进水温度 大于 40。可加多条。</div>' +
+    '<div id="cfRules"></div>' +
+    '<button class="sm" id="cfAdd">＋ 添加条件</button>' +
+    '<label class="fl">多条条件之间</label>' +
+    '<div class="seg" id="cfMode">' +
+      '<div class="s' + (draft.mode === 'any' ? '' : ' on') + '" data-mode="all">全部满足</div>' +
+      '<div class="s' + (draft.mode === 'any' ? ' on' : '') + '" data-mode="any">满足任一</div>' +
+    '</div>' +
+    '<div class="muted tiny" id="cfTip" style="margin-top:9px"></div>' +
+    '<div class="two" style="margin-top:12px">' +
+      '<button data-no>取消</button>' +
+      '<button class="pri" data-ok id="cfSave">保存并筛选</button></div>';
+
+  openBox('自定义筛选条件', html,
+    function () {
+      syncDraft();
+      var rules = draft.rules.filter(function (r) {
+        return String(r.name).trim() || String(r.num).trim();
+      }).map(function (r) {
+        return { name: String(r.name).trim(), op: r.op, num: String(r.num).trim() };
+      });
+      var bad = rules.filter(function (r) {
+        return !r.name || r.num === '' || !isFinite(parseFloat(r.num));
+      });
+      var tip = el('cfTip');
+      if (bad.length) {
+        if (tip) tip.textContent = '每条都要填变量名和数字；只填一半的条件先删掉或补完。';
+        return false;
+      }
+      if (!rules.length) {
+        try { localStorage.removeItem(CUSTOM_KEY); } catch (e) { }
+        ptFilter = 'all';
+        filterPatrol();
+        toast('已清空条件，显示全部');
+        return;
+      }
+      var on = el('mbox').querySelector('#cfMode .s.on');
+      saveCustomCfg({ rules: rules, mode: on ? on.getAttribute('data-mode') : 'all' });
+      ptFilter = 'custom';
+      filterPatrol();
+      toast('已按 ' + rules.length + ' 条条件筛选');
+    },
+    function () {
+      function draw() {
+        var box = el('cfRules');
+        if (!box) return;
+        box.innerHTML = draft.rules.map(ruleHtml).join('');
+        box.querySelectorAll('[data-del]').forEach(function (b) {
+          b.onclick = function () {
+            syncDraft();
+            draft.rules.splice(parseInt(b.getAttribute('data-del'), 10), 1);
+            draw();
+          };
+        });
+      }
+      el('cfAdd').onclick = function () {
+        syncDraft();
+        if (draft.rules.length >= 8) { toast('最多 8 条条件'); return; }
+        draft.rules.push({ name: '', op: 'lt', num: '' });
+        draw();
+      };
+      el('mbox').querySelectorAll('#cfMode .s').forEach(function (n) {
+        n.onclick = function () {
+          el('mbox').querySelectorAll('#cfMode .s').forEach(function (x) {
+            x.classList.remove('on');
+          });
+          n.classList.add('on');
+        };
+      });
+      var tip = el('cfTip');
+      if (tip) tip.textContent = '变量名按包含匹配：写「回水温度」能命中「回水温度T2」。';
+      draw();
+    });
 }

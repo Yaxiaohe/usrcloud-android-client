@@ -45,6 +45,29 @@ button.pri{background:#2b62e0;color:#fff}
 button.ok{background:#12a19a;color:#fff}
 button.dan{background:#fdecec;color:#d33d3d}
 button.sm{padding:6px 11px;font-size:12.5px;border-radius:7px}
+/* 【v0.38f】巡站页「选择账号」改半宽两列。
+   四个账号原来竖着占四行，把「巡站进度」和按钮全顶到下面去了。
+   minmax(0,1fr) 不是可省的：默认 1fr 的下限是内容宽度，
+   手机号 + 「过滤7站」会把格子撑破，两个账号就掉成上下两行。 */
+.accgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.accgrid>.item{margin-bottom:0;padding:9px 8px;min-width:0}
+.accgrid>.item .row{gap:24px}
+.accgrid>.item .chk{width:17px;height:17px;font-size:10px}
+.accgrid>.item .t{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.accgrid>.item .s{font-size:10.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.accgrid>.item .pill{font-size:10px;padding:1px 5px;white-space:nowrap}
+/* 【v0.38f】自定义筛选的一行条件：变量名 / 比较 / 数值 / 删。
+   input,select 全局是 width:100%，这里必须各自给定宽或 flex，
+   否则四个控件会一起被压成一条线。 */
+.cfr{display:flex;gap:6px;align-items:center;margin-bottom:7px}
+.cfr>*{min-width:0}
+.cfr>button{flex:0 0 auto;white-space:nowrap}
+.cfr input{flex:1 1 auto;width:auto;padding:7px 8px;font-size:12.5px}
+.cfr input.n{flex:0 0 64px;width:64px}
+.cfr select{flex:0 0 80px;width:80px;padding:7px 4px;font-size:12.5px}
+.stat b.cg{color:#12a19a}
+.stat b.cr{color:#d33d3d}
+.stat b.cb{color:#2b62e0}
 button.blk{display:block;width:100%}
 button[disabled]{opacity:.45;pointer-events:none}
 input,select{font-family:inherit;font-size:14px;border:1px solid #dde1e8;border-radius:8px;
@@ -239,7 +262,7 @@ table.tb td{padding:6px 4px;border-top:1px solid #f1f3f7}
 </head>
 <body>
 <div id="hd">
-  <span class="ver" id="hver">v0.38</span>
+  <span class="ver" id="hver">v0.39</span>
   <h1 id="htitle">有人云巡站</h1>
   <p id="hsub">铁路站点水电巡检 · 一键截图</p>
 </div>

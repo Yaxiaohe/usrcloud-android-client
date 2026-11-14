@@ -366,13 +366,19 @@ public class Watch {
      * 只要出现 *，就按「名字里含有这些字」处理，三个片段用 | 连接：
      *     *温度     → 含「温度」  → 供水温度T1 / 室内温度T3 都命中
      *     温度*     → 含「温度」  → 同上
-     *     供*T1     → 含「供」且含「T1」→ 供水温度T1 命中
+     *     供*T1     → 含「供」或含「T1」→ 供水温度T1 / 室内温度T3 都命中
      *     某线路*     → 含「某线路」  → 某站补水泵 命中
      *     *         → 全部
      * 不写 * 时是精确相等（用户想精确匹配时仍然可用）。
      *
      * 不再走「* 在头 = 结尾、* 在尾 = 开头」这套前后缀规则 ——
      * 那是把 contains 语义错做成了 prefix/suffix，正是这次的祸根。
+     *
+     * 【v0.38g】片段匹配保持原样，一个字没动。
+     * 用户明确说了「不能说匹配片段功能有问题」：带 * 的通配按「命中任一片段」算，
+     * 这是既有能力（一条规则管住一组变量），不该为了消除误中而悄悄改严。
+     * 「输入较短的词会带上不相干变量」改成由规则弹窗里的 = 提示符解决：
+     * 默认部分包含、前面加 = 表示完全一致，见 matchVarName()。
      */
     public static boolean wmatch(String pat, String s) {
         if (pat == null || pat.isEmpty() || pat.equals("*")) return true;
@@ -392,6 +398,35 @@ public class Watch {
         } catch (Exception e) {
             return false;
         }
+    }
+
+    /**
+     * 【v0.38g】规则里「变量名」这一栏的匹配粒度，和 acc / dev 用的
+     * {@link #wmatch} 分开：只有变量名需要「完全一致 / 部分包含」二选一。
+     *
+     * <p>用户原话：「加个提示符来区分是完全遵守输入的变量还是部分包含就行，
+     * 默认部分包含，在说明中写好」。提示符就是变量名前面的 {@code =}。
+     *
+     * <ul>
+     *   <li>默认（部分包含）：名字里含输入的这几个字就行。平台把「进水温度」
+     *       改成「进水温度T2」、加前缀「1#进水温度」，规则照样命中。</li>
+     *   <li>前面加 = （完全一致）：只认这个全名。输入短词（如「温度」）时
+     *       部分包含会把「风机化霜出水温度」一起算进来，用 = 写全名即可收窄。</li>
+     *   <li>带 * 的通配：沿用 wmatch 的片段语义（命中任一片段），
+     *       界面说明里写明，功能保持原样。</li>
+     *   <li>填 * = 全部变量。</li>
+     * </ul>
+     *
+     * <p>老规则没有 var_exact 字段，optBoolean 给 false，自然落到默认的
+     * 部分包含，不需要数据迁移。
+     */
+    private static boolean matchVarName(String pat, String s, boolean exact) {
+        if (pat == null || pat.isEmpty() || pat.equals("*")) return true;
+        if (s == null) return false;
+        String p = pat.trim();
+        if (exact) return s.equals(p);
+        if (p.indexOf('*') < 0) return s.contains(p);
+        return wmatch(p, s);
     }
 
     // ---------------- 开关 ----------------
@@ -1267,6 +1302,8 @@ public class Watch {
 
         String kind = r.optString("kind", "offline");
         String varPat = r.optString("var", "*");
+        /* 【v0.38g】变量名前加了 = 就是「完全一致」，老规则没这字段 → 默认部分包含。 */
+        boolean varExact = r.optBoolean("var_exact", false);
         int staleMin = r.optInt("stale_min", Core.STALE_MINUTES);
         String txt = st.statusText();
 
@@ -1310,7 +1347,7 @@ public class Watch {
             for (String[] row : st.rows) {
                 if (row.length < 5) continue;
                 String vn = row[1] == null ? "" : row[1];
-                if (!wmatch(varPat, vn)) continue;
+                if (!matchVarName(varPat, vn, varExact)) continue;
                 Double v = parseNum(row[4]);
                 if (v == null) continue;
                 boolean hit = false;

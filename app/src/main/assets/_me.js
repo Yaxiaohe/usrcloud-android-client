@@ -275,7 +275,7 @@ function V_me() {
   /* 关于 */
   s += '<div class="card"><h2>关于</h2>' +
     '<div class="row tiny muted"><span>应用</span><span class="sp"></span>' +
-    '<span>有人云巡站 v' + esc(h.version || '0.38') + '</span></div>' +
+    '<span>有人云巡站 v' + esc(h.version || '0.39') + '</span></div>' +
     /* 【v0.36 修订五】版本号一直停在 0.36，光看版本分不清装的是哪一次打包的包。
        这里把编译时刻摆出来，出问题时对着它一看就知道该不该重装。 */
     '<div class="row tiny muted" style="margin-top:7px"><span>编译</span><span class="sp"></span>' +
@@ -318,11 +318,15 @@ function ruleText(r) {
       /* 两类区间用各自的句式，不要混：
          range      → 「介于 8 ~ 30」
          notinrange → 「不在区间内（低于 8 或 高于 30）」 */
-      t.push('变量 ' + (r.var || '*') + (op === 'range'
+      /* 【v0.38g】列表里把 = 前缀带出来：用户一眼能看出这条是「完全一致」，
+         不然保存时选了精确、回到列表却看不出来，还以为没生效。 */
+      var vshow = (r.var_exact ? '=' : '') + (r.var || '*');
+      t.push('变量 ' + vshow + (op === 'range'
         ? ' 介于 ' + lo + ' ~ ' + hi
         : ' 不在区间内（低于 ' + lo + ' 或 高于 ' + hi + '）'));
     } else {
-      t.push('变量 ' + (r.var || '*') + ' ' + opText(op) + ' ' + (r.val == null ? 0 : r.val));
+      t.push('变量 ' + (r.var_exact ? '=' : '') + (r.var || '*') +
+        ' ' + opText(op) + ' ' + (r.val == null ? 0 : r.val));
     }
   }
   return t.join(' · ');
@@ -1047,21 +1051,38 @@ function editRule(idx) {
       return '<option value="' + k.v + '"' + (r.kind === k.v ? ' selected' : '') + '>' +
         k.t + '</option>';
     }).join('') + '</select>' +
-    '<label class="fl">账号（填 * 表示全部）</label>' +
+    '<label class="fl">账号（填 * = 全部；填账号名称，不是手机号）</label>' +
     '<input id="rAcc" value="' + esc(r.acc || '*') + '">' +
-    /* 【v0.21】通配说明按实际语义改了。
-       原来写「支持 * 通配」但没说清 * 放哪有效 ——
-       用户填「*回水温度」以为能匹配「回水温度T2」，
-       实际上旧实现要求「必须以回水温度结尾」，永远不匹配，
-       规则看着对却一条提醒都不来。 */
-    '<label class="fl">设备名（填 * = 全部；写「某线路」= 名字里含某线路）</label>' +
+    /* 【v0.38h】标签原来写「写「某线路」= 名字里含某线路」，可 wmatch 不带 * 时
+       是精确相等 —— 用户照着填「某线路」，一条提醒都不会来。
+       这正是 v0.21 修过的老坑，当时只改了匹配函数、没改说明。
+       现在把标签改准：想按线路筛一批站，必须写「某线路*」或「*某线路*」。 */
+    '<label class="fl">设备名（填 * = 全部；写「某线路*」= 名字含「某线路」；写全名 = 只管一台）</label>' +
     '<input id="rDev" value="' + esc(r.dev || '*') + '">' +
     '<div id="rStaleBox"' + (r.kind === 'stale' ? '' : ' style="display:none"') + '>' +
     '<label class="fl">停更超过（分钟）</label>' +
     '<input id="rStale" type="number" value="' + (r.stale_min || 15) + '"></div>' +
     '<div id="rValBox"' + (r.kind === 'value' ? '' : ' style="display:none"') + '>' +
-    '<label class="fl">变量名（填 * = 全部；写「回水温度」= 名字里含这四个字）</label>' +
-    '<input id="rVar" value="' + esc(r.var || '*') + '">' +
+    /* 【v0.38g】变量名匹配粒度：用一个 = 提示符显式区分，默认部分包含。
+       用户原话：「加个提示符来区分是完全遵守输入的变量还是部分包含就行，
+       默认部分包含，在说明中写好」。片段通配功能本身没问题，一个字没动。
+       输入框顺手关掉自动填充：真机上输入「进水温度」会弹出历史候选
+       （比如「风机化霜出水温度」）挡住半个弹窗，点一下就填错变量。 */
+    '<label class="fl">变量名（填 * = 全部；默认按包含；前面加 = 一字不差）</label>' +
+    '<input id="rVar" autocomplete="off" placeholder="温度 或 =进水温度 或 *" value="' +
+    esc((r.var_exact ? '=' : '') + (r.var || '*')) + '">' +
+    '<div class="muted tiny" id="rVarHint" style="margin-top:5px;line-height:1.6"></div>' +
+    /* 【v0.38h】用户原话：「输入『温度』就会命中进水回水供水温度要怎么描述，
+       让『进水温度』只筛一字不差的变量又该怎么写，功能实现了就写好说明」。
+       功能 v0.38g 已落地（matchVarName + var_exact），缺的是能照着填的例子，
+       所以说明改成「填什么 → 命中什么」的短句，不再只讲模式名。 */
+    '<div class="muted tiny" style="margin-top:5px;line-height:1.7">' +
+    '写「温度」：名字里含这两个字的都算 —— 进水温度、回水温度、供水温度都会命中，' +
+    '「风机化霜出水温度」也会带进来。<br>' +
+    '写「=进水温度」：只认全名一字不差的那个变量，' +
+    '「进水温度T2」「风机化霜出水温度」都不算。<br>' +
+    '写「*」：全部变量，不筛。带 * 的词按片段算，' +
+    '如「供*T1」命中含「供」或含「T1」的变量。</div>' +
     '<label class="fl">条件</label><div class="row">' +
     '<select id="rOp" style="width:44%">' +
     OPS.map(function (o) {
@@ -1092,6 +1113,31 @@ function editRule(idx) {
     el('rStaleBox').style.display = k === 'stale' ? '' : 'none';
     el('rValBox').style.display = k === 'value' ? '' : 'none';
   };
+
+  /* 【v0.38g】= 提示符不能只藏在说明里：用户填到一半就该看见自己
+     到底开着「完全一致」还是「部分包含」，不用去猜后端怎么判。 */
+  var rVarEl = el('rVar');
+  if (rVarEl) {
+    var paintVarHint = function () {
+      var v = (rVarEl.value || '').trim();
+      var hint = el('rVarHint');
+      if (!hint) return;
+      if (!v || v === '*') {
+        hint.textContent = '当前：全部变量';
+      } else if (v.charAt(0) === '=') {
+        var exact = v.slice(1).trim();
+        hint.textContent = exact
+          ? '当前：完全一致，只认「' + exact + '」这一个变量名'
+          : '当前：= 后面还没写变量名';
+      } else if (v.indexOf('*') >= 0) {
+        hint.textContent = '当前：片段匹配，* 分开的词命中任一个即可';
+      } else {
+        hint.textContent = '当前：部分包含，名字里含「' + v + '」就行';
+      }
+    };
+    rVarEl.oninput = paintVarHint;
+    paintVarHint();
+  }
 
 /* 【v0.26】切到「介于」时显示上限输入框，并更新提示语与 placeholder。
      【v0.27】placeholder 动态切：区间类第一个框是「下限」，其余是「阈值」。
@@ -1131,7 +1177,17 @@ el('rOp').onchange = function () {
       val2: parseFloat(el('rVal2').value) || 0,
       stale_min: parseInt(el('rStale').value, 10) || 15
     };
-    if (obj.kind === 'value') obj.var = el('rVar').value.trim() || '*';
+    /* 【v0.38g】= 提示符只活在输入框里，落盘要拆成两个字段：
+       var 存剥掉 = 的真名字，var_exact 存模式。老规则没有这个字段，
+       Java 侧 optBoolean 给 false → 默认部分包含，不用迁移数据。 */
+    if (obj.kind === 'value') {
+      var rv = el('rVar').value.trim() || '*';
+      obj.var_exact = rv.charAt(0) === '=';
+      obj.var = obj.var_exact ? rv.slice(1).trim() : rv;
+      if (!obj.var) { obj.var = '*'; obj.var_exact = false; }
+    } else {
+      obj.var_exact = false;
+    }
     if (obj.kind === 'offline') obj.stale_min = 15;
     /* 【v0.27】介于：min/max 归一，填反了也按「小的=下限、大的=上限」存。
        【v0.33】反向区间同样要归一 —— 「不在 30~8」按语义就该读成「不在 8~30」。 */
