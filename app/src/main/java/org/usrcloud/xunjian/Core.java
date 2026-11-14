@@ -1566,8 +1566,10 @@ public class Core {
     }
 
     /**
-     * @param onlyEmpty true = 只跑上一轮没取到数值的站点（离线 / 采集异常 / 失败），
-     *                  已取到值的不重跑。用于限流、弱网导致整批没取到时补跑。
+     * @param onlyEmpty true = 只跑上一轮需要重取的站点
+     *                  （离线 / 数据陈旧 / 采集异常 / 失败），只有在线的不重跑。
+     *                  【v0.39】数据陈旧虽然取到了值，但那条值是旧的，行上写「离线(数据陈旧)」；
+     *                  仪表与补跑都归到「需重取」，跟 onlineCount 只数 online 的口径一致。
      * @return null = 已启动；非 null = 没能启动的原因（要原话交给前端）
      */
     public static String startPatrol(List<String> pickedNames, boolean onlyEmpty) {
@@ -1586,18 +1588,18 @@ public class Core {
                     java.util.Set<String> s = new java.util.HashSet<>();
                     for (ReportItem it : e.getValue().report) {
                         if (it.no == null || it.no.isEmpty()) continue;
-                        /* online 有值、stale 只是旧，都算「有数据」；
-                           其余（offline / blank / error）才是这次要补的。 */
-                        if (!"online".equals(it.status) && !"stale".equals(it.status)) s.add(it.no);
+                        /* 【v0.39】只有 online 不用重跑；stale / offline / blank / error 都要。
+                           前端 patrolHasData() / emptyStat() 必须与这里一字不差。 */
+                        if (!"online".equals(it.status)) s.add(it.no);
                     }
                     if (!s.isEmpty()) only.put(e.getKey(), s);
                     total += s.size();
                 }
             }
             if (total == 0) {
-                return "上一轮没有「没取到数值」的站点，直接点「开始巡站截图」全跑即可";
+                return "上一轮没有需要重取的站点，直接点「开始巡站截图」全跑即可";
             }
-            log("[重跑] 只跑上一轮没取到数值的 " + total + " 台");
+            log("[重跑] 只跑上一轮需重取的 " + total + " 台");
         }
         pendingOnly = only;
 

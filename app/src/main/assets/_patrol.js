@@ -35,11 +35,14 @@ function saveCustomCfg(c) {
   try { localStorage.setItem(CUSTOM_KEY, JSON.stringify(c)); } catch (e) { }
 }
 
-/* 有数据 / 没数据。与 emptyStat()（补跑按钮）、后端只跑没数据的口径一致：
-   online 有值、stale 只是旧，都算有数据；其余算没取到。 */
+/* 有数据 / 需重取。与 emptyStat()（补跑按钮）、后端只跑需重取的口径一致：
+   【v0.39 修订】只有 online 算「有数据」。stale 虽然取到了数值，但那条值是旧的，
+   行上明写「○离线(数据陈旧)」，仪表却把它算进「在线」会自相矛盾 ——
+   现在归到「需重取」，和 offline / blank / error 一起补跑。
+   三处口径必须一字不差，否则按钮写 N 台、后端只跑 M 台。 */
 function patrolHasData(it) {
   var s = it && it.status;
-  return s === 'online' || s === 'stale';
+  return s === 'online';
 }
 
 /* 每行的稳定身份 data-ref="账号|下标"。
@@ -351,9 +354,9 @@ function openShotPicker(paths) {
  * Java 侧的 openDir / openDirWith / filePickTree 桥接一并摘掉，
  * 免得留下没人调的入口（bridgetest 会把它们判成「Java 有、JS 没调」的死代码）。 */
 
-/* 上一轮「没取到数值」的站点统计（只统计，不改数据）。
-   口径必须和后端一致：online 有值、stale 只是旧，都算有数据；
-   offline / blank / error 才算没取到 —— 两边算不一样的话，
+/* 上一轮「需重取」的站点统计（只统计，不改数据）。
+   口径必须和后端一致：只有 online 算有数据，
+   stale / offline / blank / error 都要重取 —— 两边算不一样的话，
    按钮上写「12 台」而后端只想跑 9 台，用户会以为按钮坏了。 */
 function emptyStat() {
   var out = { total: 0, byAcc: {} };
@@ -361,7 +364,7 @@ function emptyStat() {
   if (!r || !r.results) return out;
   Object.keys(r.results).forEach(function (k) {
     (r.results[k].report || []).forEach(function (it) {
-      if (it.status === 'online' || it.status === 'stale') return;
+      if (it.status === 'online') return;
       out.total++;
       (out.byAcc[k] = out.byAcc[k] || []).push(it.device);
     });
@@ -369,14 +372,14 @@ function emptyStat() {
   return out;
 }
 
-/* 「只跑没数据的站点」按钮：没有可补跑的就整个不出现，别占地方。 */
+/* 「只跑需重取的站点」按钮：没有可补跑的就整个不出现，别占地方。 */
 function retryHtml() {
   var es = emptyStat();
   if (!es.total) return '';
   return '<button class="blk" id="btnRetry" style="margin-top:10px">' +
-    '⟳　只跑没数据的 ' + es.total + ' 台</button>' +
+    '⟳　只跑需重取的 ' + es.total + ' 台</button>' +
     '<div class="muted tiny" style="margin-top:6px;text-align:center">' +
-    '上一轮离线 / 采集异常 / 失败的站点，已取到值的不重跑</div>';
+    '上一轮离线 / 数据陈旧 / 采集异常的站点，在线的不重跑</div>';
 }
 
 function V_patrol() {
@@ -385,7 +388,7 @@ function V_patrol() {
   var accs = G.accounts.filter(function (a) { return a.enabled; });
   var allOn = accs.length > 0 && accs.every(function (a) { return G.picked[a.name]; });
   /* 【v0.38g】结果必须在拼 HTML **之前** 就加载好。
-     原来 loadResult() 放在结果卡那一段才调，可「只跑没数据的 N 台」按钮
+     原来 loadResult() 放在结果卡那一段才调，可「只跑需重取的 N 台」按钮
      在更前面的控制区就要读 lastResult —— 首次进页面时它是空的，
      于是列表有了、按钮却没有，要等下一次重绘才冒出来。
      两处现在用同一份数据，首屏就一致。 */
@@ -426,7 +429,7 @@ function V_patrol() {
   /* 控制区 */
   s += '<div class="card">' +
     '<button class="big" id="btnRun">▶　开始巡站截图</button>' +
-    /* 【v0.38b】只跑没数据的站点。
+    /* 【v0.38b / v0.39 修订】只跑需重取的站点（离线 / 数据陈旧 / 采集异常）。
        限流、隧道里弱网、平台抽风都会导致整批没取到值；补跑 47 台要等两分钟，
        而这 47 台里往往只有十几台是空的 —— 这个按钮把它们挑出来单独跑。 */
     retryHtml() +
@@ -449,13 +452,13 @@ function V_patrol() {
      首版插在账号下面，点完「在线」还要往下滚一屏才看得到筛出来的列表，
      用户反馈「仪表离结果太远」。现在和搜索框、结果卡连成一片，点完立刻见效。
      数字是**全部站点**里各分类的台数，不受搜索词影响 —— 这样和监控页
-     顶部那排统计的语义一致，也保证「总数 = 在线 + 离线(无数据)」当场能验算。
+     顶部那排统计的语义一致，也保证「总数 = 在线 + 离线/陈旧」当场能验算。
      搜索词是另一个独立的收窄条件，结果卡里会写清「搜 X · 在线」。 */
   s += '<div class="card" style="padding:12px 10px">' +
     '<div class="stat" id="ptStat" style="margin:0;padding:2px 0;background:transparent;box-shadow:none">' +
     '<div data-st="all"><b id="stAll">0</b><span>总数</span></div>' +
     '<div data-st="online"><b id="stOn" class="cg">0</b><span>在线</span></div>' +
-    '<div data-st="bad"><b id="stBad" class="cr">0</b><span>离线(无数据)</span></div>' +
+    '<div data-st="bad"><b id="stBad" class="cr">0</b><span>离线/陈旧</span></div>' +
     '<div data-st="custom"><b id="stCus" class="cb">—</b><span>自定义</span></div>' +
     '</div>' +
     '<div class="row" style="margin-top:9px;gap:6px">' +
@@ -603,7 +606,7 @@ function bindPatrol() {
     V_patrol();
   };
 
-  /* 启动一轮（全跑 / 只跑没数据的，共用这套流程） */
+  /* 启动一轮（全跑 / 只跑需重取的，共用这套流程） */
   function startRun(onlyEmpty) {
     if (G.busy) { toast('任务进行中'); return; }
     var names;
@@ -1230,7 +1233,7 @@ function bindResult() {
  *
  * 两遍扫描：第一遍算属性 + 全量分类计数（仪表数字），
  * 第二遍按「搜索词 ∩ 仪表条件」决定谁显示。
- * 仪表数字只按全量算，所以「总数 = 在线 + 离线(无数据)」当场能验算。
+ * 仪表数字只按全量算，所以「总数 = 在线 + 离线/陈旧」当场能验算。
  */
 function filterPatrol() {
   var main = el('main');
@@ -1292,7 +1295,7 @@ function filterPatrol() {
   var parts = [];
   if (q) parts.push('搜「' + kwPatrol.trim() + '」');
   if (ptFilter === 'online') parts.push('在线');
-  else if (ptFilter === 'bad') parts.push('离线(无数据)');
+  else if (ptFilter === 'bad') parts.push('离线/陈旧');
   else if (ptFilter === 'custom') parts.push('自定义 ' + cfg.rules.length + ' 条');
   var filtering = parts.length > 0;
 
