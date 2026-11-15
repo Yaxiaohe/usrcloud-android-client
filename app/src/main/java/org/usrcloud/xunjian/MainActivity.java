@@ -76,6 +76,9 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle saved) {
         super.onCreate(saved);
         Core.init(this);
+        /* 【v0.40.01】启动时顺手清掉以前下载、攒在 updates/ 里的旧安装包。
+           后台线程做文件 IO，不占主线程；最多只留最近下载的那一个。 */
+        Update.cleanOnStart(this);
         // 通知渠道必须在第一次 notify 之前建好，否则静默失败
         Notifier.init(this);
         /* 【v0.20】恢复上次的监控开关。之前 enabled 只在内存里，
@@ -163,6 +166,12 @@ public class MainActivity extends Activity {
                 super.onPageFinished(view, url);
                 webReady = true;
                 pushOpenTarget();
+                /* 【v0.40.02】页面就绪后才敢调前端的自动检查函数。
+                   「今天查过没」由 Java 侧的日期文件把关，重复调用不会重复查。 */
+                try {
+                    view.evaluateJavascript("window.updDaily && window.updDaily()", null);
+                } catch (Exception ignored) {
+                }
             }
         });
 
@@ -286,6 +295,15 @@ public class MainActivity extends Activity {
                 webRef.evaluateJavascript(
                         "window.onNotifyChanged && window.onNotifyChanged("
                                 + nNow + ")", null);
+            } catch (Exception ignored) {
+            }
+        }
+        /* 【v0.40.02】App 挂在后台跨了天，再回前台也算「今天第一次」。
+           页面没加载完时前端函数还不存在，这句会静默跳过，
+           等 onPageFinished 再补一次；日期标记保证一天最多查一次。 */
+        if (webReady) {
+            try {
+                webRef.evaluateJavascript("window.updDaily && window.updDaily()", null);
             } catch (Exception ignored) {
             }
         }
@@ -470,6 +488,9 @@ public class MainActivity extends Activity {
                 /* 【v0.27】包里自带几个预置账号，下发给前端显示。
                    不带预置账号的版本这里就是 0，界面文案跟着变。 */
                 o.put("presetCount", Core.presetAccountCount());
+                /* 【v0.40】只有打包时注入了更新源的变体才显示「检查更新」。
+                   不把网址、账号、密码下发到网页，前端只拿一个布尔值。 */
+                o.put("updateEnabled", Update.enabled(this));
                 o.put("allFiles", hasAllFilesAccess());
                 /* 通知可用性：Android 13+ 没授权 / 通道被用户关掉都会导致
                    「点了没反应」。暴露给前端，在「我的」页如实显示。 */
@@ -479,6 +500,37 @@ public class MainActivity extends Activity {
                 o.put("stateChannel", Notifier.channelOn(this, "patrol_state"));
                 return o;
             }
+            /* 【v0.40】在线更新。桥里一律不发网络请求：
+               Android.call 是同步的，在这里拉网会把页面冻住。
+               检查和下载都走「Start 起线程 + Poll 轮询」两段式。 */
+            /* 【v0.40.02】每天第一次进 App 的自动检查入口。
+               只判日期 + 起后台线程，桥里不发网络请求。 */
+            case "updateAutoDaily": {
+                JSONObject o = new JSONObject();
+                o.put("started", Update.autoCheckDaily(this));
+                return o;
+            }
+            case "updateCheckStart": {
+                String msg = Update.checkStart(this);
+                JSONObject o = new JSONObject();
+                o.put("ok", msg == null);
+                o.put("msg", msg == null ? "" : msg);
+                return o;
+            }
+            case "updateCheckPoll":
+                return Update.checkPoll();
+            case "updateDownloadStart": {
+                String msg = Update.downloadStart(this);
+                JSONObject o = new JSONObject();
+                o.put("ok", msg == null);
+                o.put("msg", msg == null ? "" : msg);
+                return o;
+            }
+            case "updateDownloadPoll":
+                return Update.downloadPoll();
+            case "updateInstall":
+                return Update.install(this);
+
             case "askAllFiles": {
                 // 点了就跳系统设置页，用户返回后前端会重新 health 刷新状态
                 runOnUiThread(() -> openAllFilesSettings());
@@ -1136,10 +1188,45 @@ public class MainActivity extends Activity {
                 }
                 String cur = Core.batchDir == null ? "" : new File(Core.batchDir).getName();
                 int pubN = ShotStore.cleanOldBatches(cur);
+
+                /* 【v0.39 修订】历史 zip 平铺在私有 files/ 根层，从来不在批次目录里：
+                   runPatrol 每轮把「有人云巡站截图_yyyyMMdd_HHmmss.zip」直接写进
+                   getExternalFilesDir(null)，而上面两处只删「批次目录」。
+                   真机实测：点了「清理往期」，对外目录确实空了，
+                   内部 39 个 zip 一个没少、共 565 MB。这里按文件名白名单单独清。 */
+                File ext = MainActivity.this.getExternalFilesDir(null);
+                File[] zfs = (ext == null || !ext.isDirectory()) ? null : ext.listFiles();
+                if (zfs == null) zfs = new File[0];
+                int zipN = 0;
+                long freed = 0;
+                /* 当前轮刚打的那份保留；进程重启后 zipName 为空，
+                   就按文件名里的时间戳留最新一份（格式固定，字典序即时间序）。 */
+                String keepZip = Core.zipName;
+                if (keepZip == null) {
+                    for (File f : zfs) {
+                        if (f == null || !f.isFile()) continue;
+                        String n = f.getName();
+                        if (!n.matches("^有人云巡站截图_\\d{8}_\\d{6}\\.zip$")) continue;
+                        if (keepZip == null || n.compareTo(keepZip) > 0) keepZip = n;
+                    }
+                }
+                /* 只删认识的文件名，绝不整目录删 —— 这个目录里还可能有别的东西。 */
+                for (File f : zfs) {
+                    if (f == null || !f.isFile()) continue;
+                    String n = f.getName();
+                    if (!n.matches("^有人云巡站截图_\\d{8}_\\d{6}\\.zip$")) continue;
+                    if (n.equals(keepZip)) continue;
+                    long sz = f.length();
+                    if (f.delete()) { zipN++; freed += sz; }
+                }
+
                 JSONObject o = new JSONObject();
                 o.put("ok", true);
                 o.put("removed", removed.size());
                 o.put("removedPub", pubN);
+                o.put("removedZip", zipN);
+                /* 释放空间按「删除前实际读到的文件长度」累加，不估算、不编。 */
+                o.put("freedBytes", freed);
                 return o;
             }
 

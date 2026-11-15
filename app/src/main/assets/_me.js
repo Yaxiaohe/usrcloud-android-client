@@ -275,7 +275,7 @@ function V_me() {
   /* 关于 */
   s += '<div class="card"><h2>关于</h2>' +
     '<div class="row tiny muted"><span>应用</span><span class="sp"></span>' +
-    '<span>有人云巡站 v' + esc(h.version || '0.39') + '</span></div>' +
+    '<span>有人云巡站 v' + esc(h.version || '0.40.02') + '</span></div>' +
     /* 【v0.36 修订五】版本号一直停在 0.36，光看版本分不清装的是哪一次打包的包。
        这里把编译时刻摆出来，出问题时对着它一看就知道该不该重装。 */
     '<div class="row tiny muted" style="margin-top:7px"><span>编译</span><span class="sp"></span>' +
@@ -288,7 +288,13 @@ function V_me() {
        会变成一个没有地址栏的浏览器，用户既回不去也没法复制链接，
        所以交给系统浏览器（走 Android.openUrl 桥）。 */
     '<div class="row tiny muted" style="margin-top:7px"><span>项目地址</span><span class="sp"></span>' +
-    '<span id="mGh" style="color:#2b62e0">GitHub 主页 ›</span></div></div>';
+    '<span id="mGh" style="color:#2b62e0">GitHub 主页 ›</span></div>' +
+    /* 【v0.40】只有内置了更新源的那个变体才显示入口。
+       网页只拿 health.updateEnabled 这个布尔值，不拿网址、账号、密码。 */
+    (h.updateEnabled
+      ? '<button class="sm pri blk" id="mUpdate" style="margin-top:11px">检查更新</button>'
+      : '') +
+    '</div>';
 
   el('main').innerHTML = s;
   bindMe();
@@ -337,8 +343,138 @@ function opText(v) {
   return '大于';
 }
 
+/* 【v0.40】在线更新：检查 → 下载 → 校验 → 交给系统安装器。
+   三段都是「Start 起线程 + Poll 每 600ms 问一次」，绝不直接在桥里拉网
+   （Android.call 是同步的，同步发 HTTP 会把页面冻住）。
+   界面不出现更新地址、账号、密码，失败提示由后端按网络类型生成。 */
+
+/* 【v0.40.02】每天第一次打开软件时自动查一次。
+   页面加载完、以及从后台回到前台，Java 都会来敲一下这个函数；
+   「今天查过没」由 Java 记着，重复敲不会重复查。
+   没查到新版、或者连不上服务器，都一声不吭；只有真有新版才弹窗。
+   手动点「检查更新」不走这里，随时想查都能查。 */
+function updDaily() {
+  var r = api('updateAutoDaily', {});
+  if (!r.started) return;
+  updCheckPoll(0, true);
+}
+
+function updCheck() {
+  var r = api('updateCheckStart', {});
+  if (!r.ok) { toast(r.msg || '开始检查失败'); return; }
+  toast('正在检查更新…');
+  updCheckPoll(0);
+}
+
+/* 自动检查走静默模式：不提示、不打扰，只有发现新版才弹窗。
+   手动点的那次保留原来的所有提示。 */
+function updCheckPoll(n, silent) {
+  setTimeout(function () {
+    var r = api('updateCheckPoll', {});
+    if (r.running) {
+      if (n < 40) updCheckPoll(n + 1, silent);
+      else if (!silent) toast('检查超时，请稍后再试');
+      return;
+    }
+    if (!r.ok) {
+      if (!silent) toast(r.hint || '检查更新失败');
+      return;
+    }
+    /* 主地址连不上、备用地址顶上时才提示；更新本身不中断。 */
+    if (r.switchHint && !silent) toast(r.switchHint);
+    if (!r.newer) {
+      if (!silent) toast('已是最新版本 v' + (r.version || (G.health || {}).version || ''));
+      return;
+    }
+    updBox(r);
+  }, 600);
+}
+
+function updBox(r) {
+  var mb = r.size > 0 ? String(Math.round(r.size / 1048576 * 10) / 10) + ' MB' : '大小未知';
+  var added = r.added || [];
+  var fixed = r.fixed || [];
+  var body;
+  if (added.length || fixed.length) {
+    /* 【v0.40.02】清单给了分条说明，就用「新增了 / 修复了」写出来，一条一句短话。 */
+    body = '';
+    if (added.length) {
+      body += '<div class="tiny" style="margin-top:10px"><b>新增了</b></div>';
+      for (var i = 0; i < added.length; i++) {
+        body += '<div class="tiny muted" style="margin-top:4px">· ' + esc(added[i]) + '</div>';
+      }
+    }
+    if (fixed.length) {
+      body += '<div class="tiny" style="margin-top:10px"><b>修复了</b></div>';
+      for (var j = 0; j < fixed.length; j++) {
+        body += '<div class="tiny muted" style="margin-top:4px">· ' + esc(fixed[j]) + '</div>';
+      }
+    }
+  } else {
+    /* 老清单没有分条说明，照旧显示整段文字。 */
+    body = '<div class="tiny muted" style="margin-top:9px;white-space:pre-wrap">' +
+           esc(r.notes || '本次更新没有附带说明') + '</div>';
+  }
+  var html =
+    '<div class="tiny">发现新版本 <b>v' + esc(r.version || '') + '</b>' +
+    '，当前 v' + esc((G.health || {}).version || '') + '</div>' +
+    body +
+    '<div class="tiny muted" style="margin-top:9px">安装包约 ' + esc(mb) + '</div>' +
+    '<div id="updProg" class="tiny" style="margin-top:9px"></div>' +
+    '<div class="two" style="margin-top:12px">' +
+      '<button class="btn" data-no>稍后</button>' +
+      '<button class="btn pri" id="updGo">下载更新</button>' +
+    '</div>';
+  openBox('检查更新', html, null, function () {
+    var go = el('updGo');
+    if (go) go.onclick = function () { updDownload(); };
+  });
+}
+
+function updDownload() {
+  var r = api('updateDownloadStart', {});
+  if (!r.ok) { toast(r.msg || '开始下载失败'); return; }
+  var go = el('updGo');
+  if (go) { go.disabled = true; go.textContent = '下载中…'; }
+  updDownloadPoll(0);
+}
+
+function updDownloadPoll(n) {
+  setTimeout(function () {
+    var r = api('updateDownloadPoll', {});
+    var pg = el('updProg');
+    if (pg && r.running) {
+      pg.textContent = r.progress >= 0 ? '下载中 ' + r.progress + '%' : '下载中…';
+    }
+    if (r.running) {
+      if (n < 200) updDownloadPoll(n + 1);
+      else toast('下载超时，请检查网络后重试');
+      return;
+    }
+    if (!r.ok) {
+      toast(r.error || '下载失败');
+      var go = el('updGo');
+      if (go) { go.disabled = false; go.textContent = '重试下载'; }
+      return;
+    }
+    if (pg) pg.textContent = '下载完成，已校验安装包';
+    var go = el('updGo');
+    if (go) { go.disabled = false; go.textContent = '立即安装'; go.onclick = updInstall; }
+  }, 600);
+}
+
+function updInstall() {
+  var r = api('updateInstall', {});
+  if (!r.ok) toast(r.msg || '打不开安装器');
+  else toast('已交给系统安装器，按提示完成安装');
+}
+
 function bindMe() {
   var m = el('main');
+
+  /* 【v0.40】检查更新入口：无预置账号包里这个按钮根本不会渲染。 */
+  var mu = el('mUpdate');
+  if (mu) mu.onclick = function () { updCheck(); };
 
   /* 【v0.33 修订八】关于页的 GitHub 入口：交给系统浏览器打开。
      打不开（没装浏览器 / 被拦）时如实提示，不静默失败。 */

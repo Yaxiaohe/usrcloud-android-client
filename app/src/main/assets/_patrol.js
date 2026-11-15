@@ -669,15 +669,26 @@ function bindPatrol() {
   el('btnExport').onclick = exportImages;
 
   el('btnClean').onclick = function () {
-    confirmBox('清理往期批次',
+    confirmBox('清理往期',
       '将删除手机「' + (G.health && G.health.allFiles !== false ? '根目录' : '下载') +
-      '」巡站截图目录下和 app 内部的所有历史批次（本次巡站除外），此操作不可撤销。确定继续？',
+      '」巡站截图目录下的历史批次，以及 app 内部目录里的历史压缩包和批次。' +
+      '最近一次的压缩包会保留，此操作不可撤销。确定继续？',
       function () {
         var r = api('clean', {});
         if (!r.ok) { toast(r.msg || '清理失败'); return; }
-        var n = (r.removed || 0) + (r.removedPub || 0);
-        toast(n ? ('已清理 ' + n + ' 个批次')
-          : '没有往期批次可清理（当前批次会保留）');
+        /* 【v0.39 修订】原来只把「批次目录数」相加，而历史 zip 平铺在内部目录根层，
+           一个都没被算进来 —— 所以明明删了几十个压缩包，提示还是
+           「没有往期批次可清理」。现在压缩包数与释放字节数都由后端实删返回。 */
+        var batches = (r.removed || 0) + (r.removedPub || 0);
+        var zips = r.removedZip || 0;
+        var mb = (r.freedBytes || 0) / 1048576;
+        var parts = [];
+        if (zips) parts.push(zips + ' 个压缩包');
+        if (batches) parts.push(batches + ' 个批次');
+        toast(parts.length
+          ? '已清理 ' + parts.join('、') +
+            (mb >= 0.1 ? '，释放 ' + mb.toFixed(1) + ' MB' : '')
+          : '没有往期可清理（最近一次会保留）');
       });
   };
 }
