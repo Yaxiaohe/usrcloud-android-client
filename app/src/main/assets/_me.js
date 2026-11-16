@@ -275,7 +275,7 @@ function V_me() {
   /* 关于 */
   s += '<div class="card"><h2>关于</h2>' +
     '<div class="row tiny muted"><span>应用</span><span class="sp"></span>' +
-    '<span>有人云巡站 v' + esc(h.version || '0.40.05') + '</span></div>' +
+    '<span>有人云巡站 v' + esc(h.version || '0.40.06') + '</span></div>' +
     /* 【v0.36 修订五】版本号一直停在 0.36，光看版本分不清装的是哪一次打包的包。
        这里把编译时刻摆出来，出问题时对着它一看就知道该不该重装。 */
     '<div class="row tiny muted" style="margin-top:7px"><span>编译</span><span class="sp"></span>' +
@@ -1158,29 +1158,35 @@ function editAcc(a) {
     });
 }
 
-/* ---------- 规则输入：实时命中预览（v0.40.04） ----------
+/* ---------- 规则输入：实时命中预览（v0.40.04，v0.40.06 修全角空格） ----------
    三个框（账号/设备名/变量名）输入到一半，就告诉用户两件事：
      ① 当前写法是什么功能（* 全部 / 普通包含 / = 一字不差 / 带 * 片段）
      ② 按现有清单实际命中了哪些、几个
    命中语义必须和 Java Watch.matchRuleField 一字不差，否则这里说命中、
    后端却不提醒，比不提示更坑。所以下面 ruleFieldMatch 是后端那段的逐句复刻。 */
+/* Java 的 String.trim() 只去码点 <= U+0020 的字符；JS 原生 trim() 还会去掉
+   全角空格 U+3000、不换行空格 U+00A0 等。用原生 trim 会让界面说「全部」、
+   后端却按字面包含全角空格匹配，两边对不上。这里逐字复刻 Java 的口径。 */
+function javaTrim(v) {
+  return String(v == null ? '' : v).replace(/^[\x00-\x20]+/, '').replace(/[\x00-\x20]+$/, '');
+}
+
 function ruleFieldMatch(pat, s) {
-  if (pat == null || pat === '' || String(pat).trim() === '*') return true;
+  if (pat == null || pat === '' || javaTrim(pat) === '*') return true;
   /* 空名字这里不放行、也不提前判死：Java matchRuleField 只挡 null，
      名字是空串时继续走——写「=」或纯空格，两边都算「全部」。
      提前 return false 会让界面说命中 0 个、后端照常提醒，宁可照抄后端。 */
   if (s == null) return false;
-  var p = String(pat).trim();
+  var p = javaTrim(pat);
   if (p.charAt(0) === '=') {
-    var name = p.slice(1).trim();
+    var name = javaTrim(p.slice(1));
     return name === '' ? true : s === name;
   }
   if (p.indexOf('*') < 0) return String(s).indexOf(p) >= 0;
   /* 与 Java wmatch 一致：按 * 切段，各段去空格后 OR 命中任一段即可。
      Java 用 Pattern.quote 做字面比较，这里用 indexOf 同样是字面比较，
      元字符不会被当成正则 —— 语义对齐，不是近似。 */
-  var parts = p.split('*').map(function (x) { return x.trim(); })
-               .filter(function (x) { return x !== ''; });
+  var parts = p.split('*').map(javaTrim).filter(function (x) { return x !== ''; });
   if (!parts.length) return true;
   for (var i = 0; i < parts.length; i++) if (String(s).indexOf(parts[i]) >= 0) return true;
   return false;
@@ -1188,10 +1194,10 @@ function ruleFieldMatch(pat, s) {
 
 /* 当前写法的功能说明 —— 和 ruleFieldMatch 的四个分支一一对应。 */
 function ruleFieldMode(v) {
-  v = (v || '').trim();
+  v = javaTrim(v);
   if (!v || v === '*') return '全部';
   if (v.charAt(0) === '=') {
-    return v.slice(1).trim() ? '一字不差' : '= 后面还没写名字';
+    return javaTrim(v.slice(1)) ? '一字不差' : '= 后面还没写名字';
   }
   return v.indexOf('*') >= 0 ? '片段（命中任一段）' : '名称包含';
 }
@@ -1204,8 +1210,10 @@ function ruleFieldMode(v) {
 function ruleHitSource(kind) {
   var out = [], seen = {};
   function add(s) {
-    s = (s || '').trim();
-    if (s && !seen[s]) { seen[s] = true; out.push(s); }
+    /* 候选名字按原样交给 ruleFieldMatch —— Java 后端拿到的也是原名，
+       不 trim。只用 javaTrim 判空，免得空名字混进清单。 */
+    s = s == null ? '' : String(s);
+    if (javaTrim(s) && !seen[s]) { seen[s] = true; out.push(s); }
   }
   if (kind === 'acc') {
     (G.accounts || []).forEach(function (a) { add(a && a.name); });
@@ -1228,7 +1236,7 @@ function bindRuleHit(inputId, hitId, kind, label) {
   var inp = el(inputId), box = el(hitId);
   if (!inp || !box) return;
   var paint = function () {
-    var v = (inp.value || '').trim();
+    var v = javaTrim(inp.value || '');
     var mode = ruleFieldMode(v);
     var src = ruleHitSource(kind);
     if (!src.length) {
