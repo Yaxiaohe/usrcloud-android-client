@@ -51,8 +51,12 @@ button.sm{padding:6px 11px;font-size:12.5px;border-radius:7px}
    手机号 + 「过滤7站」会把格子撑破，两个账号就掉成上下两行。 */
 .accgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
 .accgrid>.item{margin-bottom:0;padding:9px 8px;min-width:0}
-.accgrid>.item .row{gap:24px}
-.accgrid>.item .chk{width:17px;height:17px;font-size:10px}
+/* 【v0.40.03】勾选框原来走通用 .row 的 align-items:center，
+   卡片一旦多出「过滤 N 台」一行，整块变高、勾选框就往下挪 —— 看着像位置会跳。
+   这里固定成顶部对齐，并在勾选框与标题之间留 1px 微调，
+   让有/无过滤行的卡片勾选框都贴在同一高度。 */
+.accgrid>.item .row{gap:24px;align-items:flex-start}
+.accgrid>.item .chk{width:17px;height:17px;font-size:10px;margin-top:1px}
 .accgrid>.item .t{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .accgrid>.item .s{font-size:10.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .accgrid>.item .pill{font-size:10px;padding:1px 5px;white-space:nowrap}
@@ -131,7 +135,8 @@ label.fl{display:block;font-size:12.5px;color:#6b7382;margin:10px 0 5px}
 #rawBox:focus{border-color:#2f6bff;background:#fff}
 .stat{display:flex;background:#fff;border-radius:12px;padding:12px 4px;margin-bottom:12px;
   box-shadow:0 1px 3px rgba(20,30,50,.06)}
-.stat>div{flex:1;text-align:center;position:relative}
+.stat>div{flex:1;text-align:center;position:relative;min-width:0}
+/* 分隔线画在每格左边缘（第一格没有）。 */
 .stat>div+div:before{content:"";position:absolute;left:0;top:4px;bottom:4px;width:1px;background:#eef0f4}
 .stat b{display:block;font-size:19px;font-weight:600;line-height:1.25}
 .stat span{font-size:11px;color:#8b93a1}
@@ -140,6 +145,11 @@ label.fl{display:block;font-size:12.5px;color:#6b7382;margin:10px 0 5px}
 .stat>div[data-st]{cursor:pointer;padding:4px 0;border-radius:9px;transition:background .12s}
 .stat>div[data-st]:active{background:#f2f5fb}
 .stat>div[data-st].zero{opacity:.4}
+/* 【v0.40.03】蓝框是 inset 阴影，画在格子自己身上；
+   同一格左边缘那条灰色分隔线是 :before 伪元素，层叠在阴影之上，
+   把蓝框左边压掉一小段（截图里就是「左边缺一块」）。
+   选中时藏掉自己这条分隔线即可，蓝框四边完整，其余格子分隔线不动。 */
+.stat>div[data-st].on:before{display:none}
 .stat>div[data-st].on{background:#eef3fe;box-shadow:inset 0 0 0 1.5px #2b62e0}
 .stat>div[data-st].on span{color:#2b62e0;font-weight:600}
 .seg{display:flex;background:#eef1f6;border-radius:9px;padding:3px;gap:3px;overflow-x:auto}
@@ -232,6 +242,15 @@ table.tb td{padding:6px 4px;border-top:1px solid #f1f3f7}
 .pick .pf.ph{color:#a8b0bd}
 .pick .ar{color:#b9c2d0;font-size:15px;flex:0 0 auto}
 .pick:active{border-color:#2b62e0;background:#f7faff}
+/* 【v0.40.03】规则「类型」用的自定义选项列表：白底蓝字，和 .pick / 弹窗同款，
+   不再让 WebView 弹系统原生单选框（绿圆钮那套跟软件风格割裂）。 */
+.optlist{border:1px solid #e8ebf0;border-radius:10px;margin-top:6px;overflow:hidden;background:#fff}
+.optlist .op{display:flex;align-items:center;justify-content:space-between;
+  padding:10px 12px;font-size:14px;color:#2b3240;border-bottom:1px solid #f0f2f6;cursor:pointer}
+.optlist .op:last-child{border-bottom:none}
+.optlist .op:active{background:#f7faff}
+.optlist .op.on{color:#2b62e0;font-weight:600;background:#f4f8ff}
+.optlist .op .ck{color:#2b62e0;font-size:14px}
 /* 【v0.22】批量导出选择行：off = 已导出过，标灰但仍可再勾（用户有时确实要重发） */
 .pick.off{background:#f6f7f9;border-color:#eef0f4;color:#9aa2ae}
 .pick.off .t{color:#9aa2ae}
@@ -262,7 +281,7 @@ table.tb td{padding:6px 4px;border-top:1px solid #f1f3f7}
 </head>
 <body>
 <div id="hd">
-  <span class="ver" id="hver">v0.40.02</span>
+  <span class="ver" id="hver">v0.40.03</span>
   <h1 id="htitle">有人云巡站</h1>
   <p id="hsub">铁路站点水电巡检 · 一键截图</p>
 </div>

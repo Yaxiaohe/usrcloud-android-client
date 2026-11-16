@@ -429,6 +429,29 @@ public class Watch {
         return wmatch(p, s);
     }
 
+    /**
+     * 【v0.40.03】规则里「账号」「设备名」两栏的匹配口径，和变量名统一：
+     *   *        → 全部
+     *   某线路     → 名称里包含「某线路」二字（默认部分包含）
+     *   =某线路    → 只有名称一字不差才算命中
+     *   某线路*    → 沿用片段通配（命中任一片段），既有能力不放窄
+     *
+     * 以前这两栏走 {@link #wmatch}，不带 * 是精确相等 ——
+     * 用户按新说明填「某线路」却一条提醒都收不到，正是当初 v0.21 修过的坑。
+     * 这里只给规则匹配用；账号过滤、站点过滤等仍用 wmatch，互不影响。
+     */
+    public static boolean matchRuleField(String pat, String s) {
+        if (pat == null || pat.isEmpty() || pat.trim().equals("*")) return true;
+        if (s == null) return false;
+        String p = pat.trim();
+        if (p.startsWith("=")) {
+            String name = p.substring(1).trim();
+            return name.isEmpty() ? true : s.equals(name);
+        }
+        if (p.indexOf('*') < 0) return s.contains(p);
+        return wmatch(p, s);
+    }
+
     // ---------------- 开关 ----------------
 
     public static synchronized void setEnabled(boolean on) {
@@ -1297,8 +1320,10 @@ public class Watch {
      *     v0.33 起新增 notinrange（不在区间内：数值 &lt;= val 或 &gt;= val2）
      */
     private static String matchRule(JSONObject r, Account cfg, Core.Dev d, DevState st) {
-        if (!wmatch(r.optString("acc", "*"), cfg.name)) return null;
-        if (!wmatch(r.optString("dev", "*"), d.name == null ? "" : d.name)) return null;
+        /* 【v0.40.03】账号/设备名改走新口径：默认包含、= 精确、* 片段通配。
+           和弹窗里的举例说明一一对应，填「某线路」就能命中名称含某线路的账号/设备。 */
+        if (!matchRuleField(r.optString("acc", "*"), cfg.name)) return null;
+        if (!matchRuleField(r.optString("dev", "*"), d.name == null ? "" : d.name)) return null;
 
         String kind = r.optString("kind", "offline");
         String varPat = r.optString("var", "*");

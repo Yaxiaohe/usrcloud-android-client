@@ -275,7 +275,7 @@ function V_me() {
   /* 关于 */
   s += '<div class="card"><h2>关于</h2>' +
     '<div class="row tiny muted"><span>应用</span><span class="sp"></span>' +
-    '<span>有人云巡站 v' + esc(h.version || '0.40.02') + '</span></div>' +
+    '<span>有人云巡站 v' + esc(h.version || '0.40.03') + '</span></div>' +
     /* 【v0.36 修订五】版本号一直停在 0.36，光看版本分不清装的是哪一次打包的包。
        这里把编译时刻摆出来，出问题时对着它一看就知道该不该重装。 */
     '<div class="row tiny muted" style="margin-top:7px"><span>编译</span><span class="sp"></span>' +
@@ -1102,7 +1102,9 @@ function editAcc(a) {
        结果 12 台设备全被滤掉，表现为「登不上」，
        实际跟账号密码毫无关系 —— 不在填的时候说清楚，
        用户只会反复重输密码。 */
-    '<div id="kwTip" class="muted tiny" style="margin-top:-4px"></div>' +
+    /* 【v0.40.03】原来 margin-top:-4px 把提示文字吸到输入框下边框上，
+       看着像粘在框里。改成正常间距，和上面的填写框拉开。 */
+    '<div id="kwTip" class="muted tiny" style="margin-top:6px;line-height:1.6"></div>' +
     '<label class="fl" style="display:flex;align-items:center;gap:8px;cursor:pointer">' +
     '<input type="checkbox" id="eEn" style="width:19px;height:19px;flex:0 0 auto"' +
     (a.enabled ? ' checked' : '') + '> 启用此账号</label>' +
@@ -1182,18 +1184,28 @@ function editRule(idx) {
     '<label class="fl">规则名称（选填，用于在通知里认出这条规则）</label>' +
     '<input id="rName" maxlength="30" placeholder="如：冬季供水温度过低" value="' +
     esc(r.rule_name || '') + '">' +
-    '<label class="fl">类型</label><select id="rKind">' +
+    /* 【v0.40.03】类型改成软件同款选择行 + 白底蓝字选项列表。
+       原生 <select> 在 WebView 里弹系统绿圆钮单选框，跟整体样式割裂。
+       select 仍保留（隐藏）作为值的唯一来源，测试照旧能读/写/触发 change。 */
+    '<label class="fl">类型</label>' +
+    '<select id="rKind" style="display:none">' +
     KINDS.map(function (k) {
       return '<option value="' + k.v + '"' + (r.kind === k.v ? ' selected' : '') + '>' +
         k.t + '</option>';
     }).join('') + '</select>' +
-    '<label class="fl">账号（填 * = 全部；填账号名称，不是手机号）</label>' +
+    '<button id="rKindPick" class="pick"><span class="pf" id="rKindText">' +
+    esc(kindText(r.kind)) + '</span><span class="ar">›</span></button>' +
+    '<div id="rKindOpts" class="optlist" style="display:none">' +
+    KINDS.map(function (k) {
+      return '<div class="op' + (r.kind === k.v ? ' on' : '') + '" data-kind="' + k.v + '">' +
+        '<span>' + k.t + '</span><span class="ck">' + (r.kind === k.v ? '✓' : '') + '</span></div>';
+    }).join('') + '</div>' +
+    /* 【v0.40.03】三栏说明统一成「举例」格式：填什么 → 命中什么。
+       Java 侧 matchRuleField 已同步成默认包含、= 一字不差、* 片段通配，
+       说明与行为一一对应（填「某线路」就真能命中名称含某线路的那一批）。 */
+    '<label class="fl">账号（举例：「*」全部账号；「某线路」只匹配名称中有某线路二字的账号；「=某线路」只匹配名称一字不差的账号）</label>' +
     '<input id="rAcc" value="' + esc(r.acc || '*') + '">' +
-    /* 【v0.38h】标签原来写「写「某线路」= 名字里含某线路」，可 wmatch 不带 * 时
-       是精确相等 —— 用户照着填「某线路」，一条提醒都不会来。
-       这正是 v0.21 修过的老坑，当时只改了匹配函数、没改说明。
-       现在把标签改准：想按线路筛一批站，必须写「某线路*」或「*某线路*」。 */
-    '<label class="fl">设备名（填 * = 全部；写「某线路*」= 名字含「某线路」；写全名 = 只管一台）</label>' +
+    '<label class="fl">设备名（举例：「*」全部设备；「某线路」名称中包含某线路二字的设备；「=某线路」一字不差的设备）</label>' +
     '<input id="rDev" value="' + esc(r.dev || '*') + '">' +
     '<div id="rStaleBox"' + (r.kind === 'stale' ? '' : ' style="display:none"') + '>' +
     '<label class="fl">停更超过（分钟）</label>' +
@@ -1204,7 +1216,7 @@ function editRule(idx) {
        默认部分包含，在说明中写好」。片段通配功能本身没问题，一个字没动。
        输入框顺手关掉自动填充：真机上输入「进水温度」会弹出历史候选
        （比如「风机化霜出水温度」）挡住半个弹窗，点一下就填错变量。 */
-    '<label class="fl">变量名（填 * = 全部；默认按包含；前面加 = 一字不差）</label>' +
+    '<label class="fl">变量名（举例：「*」全部变量；「温度」名称中包含温度二字的变量；「=温度」一字不差的变量）</label>' +
     '<input id="rVar" autocomplete="off" placeholder="温度 或 =进水温度 或 *" value="' +
     esc((r.var_exact ? '=' : '') + (r.var || '*')) + '">' +
     '<div class="muted tiny" id="rVarHint" style="margin-top:5px;line-height:1.6"></div>' +
@@ -1248,7 +1260,35 @@ function editRule(idx) {
     var k = this.value;
     el('rStaleBox').style.display = k === 'stale' ? '' : 'none';
     el('rValBox').style.display = k === 'value' ? '' : 'none';
+    /* 【v0.40.03】值变了要同步选择行的文字和选项高亮，
+       否则下拉选了「数值越限」、上面那行还写着「设备离线」。 */
+    var tx = el('rKindText');
+    if (tx) tx.textContent = kindText(k);
+    var opts = el('rKindOpts');
+    if (opts) opts.querySelectorAll('[data-kind]').forEach(function (n) {
+      var on = n.getAttribute('data-kind') === k;
+      n.classList.toggle('on', on);
+      n.querySelector('.ck').textContent = on ? '✓' : '';
+    });
   };
+
+  /* 【v0.40.03】点选择行展开软件同款列表；点某项写回 select 并触发 change。
+     用 select 当唯一数据源，保存逻辑和原有测试一行都不用改。 */
+  var kPick = el('rKindPick');
+  var kOpts = el('rKindOpts');
+  if (kPick && kOpts) {
+    kPick.onclick = function () {
+      kOpts.style.display = (kOpts.style.display === 'none') ? '' : 'none';
+    };
+    kOpts.querySelectorAll('[data-kind]').forEach(function (n) {
+      n.onclick = function () {
+        var s = el('rKind');
+        s.value = n.getAttribute('data-kind');
+        s.onchange();
+        kOpts.style.display = 'none';
+      };
+    });
+  }
 
   /* 【v0.38g】= 提示符不能只藏在说明里：用户填到一半就该看见自己
      到底开着「完全一致」还是「部分包含」，不用去猜后端怎么判。 */
