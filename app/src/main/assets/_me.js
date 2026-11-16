@@ -275,7 +275,7 @@ function V_me() {
   /* 关于 */
   s += '<div class="card"><h2>关于</h2>' +
     '<div class="row tiny muted"><span>应用</span><span class="sp"></span>' +
-    '<span>有人云巡站 v' + esc(h.version || '0.40.04') + '</span></div>' +
+    '<span>有人云巡站 v' + esc(h.version || '0.40.05') + '</span></div>' +
     /* 【v0.36 修订五】版本号一直停在 0.36，光看版本分不清装的是哪一次打包的包。
        这里把编译时刻摆出来，出问题时对着它一看就知道该不该重装。 */
     '<div class="row tiny muted" style="margin-top:7px"><span>编译</span><span class="sp"></span>' +
@@ -372,7 +372,6 @@ function updCheckPoll(n, silent) {
   setTimeout(function () {
     var r = api('updateCheckPoll', {});
     if (r.running) {
-      /* 后端会按两条线路各试一次，最坏 14 秒左右；这里放宽到 45 次。 */
       if (n < 45) updCheckPoll(n + 1, silent);
       else if (!silent) toast('检查超时，请稍后再试');
       return;
@@ -446,7 +445,6 @@ function updDownloadPoll(n) {
       pg.textContent = r.progress >= 0 ? '下载中 ' + r.progress + '%' : '下载中…';
     }
     if (r.running) {
-      /* 下载失败会换另一条线路再下一遍，最坏两三分钟；这里放宽到 260 次。 */
       if (n < 260) updDownloadPoll(n + 1);
       else toast('下载超时，请检查网络后重试');
       return;
@@ -1160,6 +1158,96 @@ function editAcc(a) {
     });
 }
 
+/* ---------- 规则输入：实时命中预览（v0.40.04） ----------
+   三个框（账号/设备名/变量名）输入到一半，就告诉用户两件事：
+     ① 当前写法是什么功能（* 全部 / 普通包含 / = 一字不差 / 带 * 片段）
+     ② 按现有清单实际命中了哪些、几个
+   命中语义必须和 Java Watch.matchRuleField 一字不差，否则这里说命中、
+   后端却不提醒，比不提示更坑。所以下面 ruleFieldMatch 是后端那段的逐句复刻。 */
+function ruleFieldMatch(pat, s) {
+  if (pat == null || pat === '' || String(pat).trim() === '*') return true;
+  /* 空名字这里不放行、也不提前判死：Java matchRuleField 只挡 null，
+     名字是空串时继续走——写「=」或纯空格，两边都算「全部」。
+     提前 return false 会让界面说命中 0 个、后端照常提醒，宁可照抄后端。 */
+  if (s == null) return false;
+  var p = String(pat).trim();
+  if (p.charAt(0) === '=') {
+    var name = p.slice(1).trim();
+    return name === '' ? true : s === name;
+  }
+  if (p.indexOf('*') < 0) return String(s).indexOf(p) >= 0;
+  /* 与 Java wmatch 一致：按 * 切段，各段去空格后 OR 命中任一段即可。
+     Java 用 Pattern.quote 做字面比较，这里用 indexOf 同样是字面比较，
+     元字符不会被当成正则 —— 语义对齐，不是近似。 */
+  var parts = p.split('*').map(function (x) { return x.trim(); })
+               .filter(function (x) { return x !== ''; });
+  if (!parts.length) return true;
+  for (var i = 0; i < parts.length; i++) if (String(s).indexOf(parts[i]) >= 0) return true;
+  return false;
+}
+
+/* 当前写法的功能说明 —— 和 ruleFieldMatch 的四个分支一一对应。 */
+function ruleFieldMode(v) {
+  v = (v || '').trim();
+  if (!v || v === '*') return '全部';
+  if (v.charAt(0) === '=') {
+    return v.slice(1).trim() ? '一字不差' : '= 后面还没写名字';
+  }
+  return v.indexOf('*') >= 0 ? '片段（命中任一段）' : '名称包含';
+}
+
+/* 命中清单的真实来源。都取已经加载到本地的数据，不联网、不编造。
+   - 账号：G.accounts（启动时 accounts 接口加载）
+   - 设备：G.devCache（巡站缓存）+ G.ws.devices（监控状态）合并去重
+   - 变量：G.ws.devices[].rows[][0]（监控实际采到的变量名）去重
+   还没有数据时返回空数组，界面会如实写「还没有清单」，不假装命中 0 个。 */
+function ruleHitSource(kind) {
+  var out = [], seen = {};
+  function add(s) {
+    s = (s || '').trim();
+    if (s && !seen[s]) { seen[s] = true; out.push(s); }
+  }
+  if (kind === 'acc') {
+    (G.accounts || []).forEach(function (a) { add(a && a.name); });
+  } else if (kind === 'dev') {
+    var cache = G.devCache || {};
+    Object.keys(cache).forEach(function (acc) {
+      (cache[acc] || []).forEach(function (d) { add(d && d.name); });
+    });
+    ((G.ws && G.ws.devices) || []).forEach(function (d) { add(d && d.name); });
+  } else if (kind === 'var') {
+    ((G.ws && G.ws.devices) || []).forEach(function (d) {
+      ((d && d.rows) || []).forEach(function (row) { add(row && row[0]); });
+    });
+  }
+  return out;
+}
+
+/* 给一个输入框绑实时提示。输入时重算，不输入时在初始化时算一次。 */
+function bindRuleHit(inputId, hitId, kind, label) {
+  var inp = el(inputId), box = el(hitId);
+  if (!inp || !box) return;
+  var paint = function () {
+    var v = (inp.value || '').trim();
+    var mode = ruleFieldMode(v);
+    var src = ruleHitSource(kind);
+    if (!src.length) {
+      box.textContent = '当前：' + mode + '；还没有' + label + '清单可比对';
+      return;
+    }
+    var hits = src.filter(function (s) { return ruleFieldMatch(v, s); });
+    /* 【v0.40.04 补丁】用户要求只写实际命中几个，不写「/总数」——手机上
+       935 个变量那种总数又长又没用，还把名字挤到下一行。 */
+    var txt = '当前：' + mode + ' · 命中 ' + hits.length + ' 个' + label;
+    if (hits.length) {
+      txt += '：' + hits.slice(0, 6).join('、') + (hits.length > 6 ? '…' : '');
+    }
+    box.textContent = txt;
+  };
+  inp.oninput = paint;
+  paint();
+}
+
 /* ---------- 规则编辑 ---------- */
 /* 【v0.21】改签名：接索引而不是对象引用。
    原来用 (G.rules.rules||[]).indexOf(r) 反查索引 ——
@@ -1169,6 +1257,13 @@ function editAcc(a) {
    直接由调用方传索引，来源唯一。 */
 function editRule(idx) {
   var isNew = (idx == null || idx < 0);
+  /* 【v0.40.04】规则弹窗直接就可能从「我的」页打开，此时还没进过监控页，
+     G.ws 是空的，命中预览就没数据可比对。这里补拉一次本地监控状态
+     （只读内存快照、不发网络），让账号/设备/变量的命中清单有真数据。 */
+  if (!G.ws) {
+    var ws0 = api('watchState', {});
+    if (ws0 && ws0.ok) G.ws = ws0;
+  }
   var list = (G.rules && G.rules.rules) || [];
   var r = isNew
       ? { acc: '*', dev: '*', var: '*', kind: 'offline', op: 'gt', val: 0, stale_min: 15 }
@@ -1200,13 +1295,14 @@ function editRule(idx) {
       return '<div class="op' + (r.kind === k.v ? ' on' : '') + '" data-kind="' + k.v + '">' +
         '<span>' + k.t + '</span><span class="ck">' + (r.kind === k.v ? '✓' : '') + '</span></div>';
     }).join('') + '</div>' +
-    /* 【v0.40.04】三栏说明改成和 Windows 版同一句式「写什么 → 只匹配什么」。
-       上一版写成了名词短语（「名称中包含某线路二字的设备」），看不出是规则，
-       设备名那一句连动词都没有；* 片段规则也漏了。口径与 Java matchRuleField 一致。 */
-    '<label class="fl">账号（「*」全部账号；写「某线路」只匹配名称含某线路二字的账号；写「=某线路」只匹配名称一字不差的账号；带「*」按片段）</label>' +
+    /* 【v0.40.04】三栏说明改短：一句讲清规则，例子交给下方实时的「命中 N 个」。
+       规则不变：* 全部 / 普通写法按包含 / = 开头一字不差 / 带 * 按片段。 */
+    '<label class="fl">账号（* 全部；写法按包含；=开头 一字不差）</label>' +
     '<input id="rAcc" value="' + esc(r.acc || '*') + '">' +
-    '<label class="fl">设备名（「*」全部设备；写「某线路」只匹配名称含某线路二字的设备；写「=某线路」只匹配名称一字不差的设备；带「*」按片段）</label>' +
+    '<div class="muted tiny rHit" id="rAccHit"></div>' +
+    '<label class="fl">设备名（* 全部；写法按包含；=开头 一字不差）</label>' +
     '<input id="rDev" value="' + esc(r.dev || '*') + '">' +
+    '<div class="muted tiny rHit" id="rDevHit"></div>' +
     '<div id="rStaleBox"' + (r.kind === 'stale' ? '' : ' style="display:none"') + '>' +
     '<label class="fl">停更超过（分钟）</label>' +
     '<input id="rStale" type="number" value="' + (r.stale_min || 15) + '"></div>' +
@@ -1216,21 +1312,10 @@ function editRule(idx) {
        默认部分包含，在说明中写好」。片段通配功能本身没问题，一个字没动。
        输入框顺手关掉自动填充：真机上输入「进水温度」会弹出历史候选
        （比如「风机化霜出水温度」）挡住半个弹窗，点一下就填错变量。 */
-    '<label class="fl">变量名（「*」全部变量；写「温度」只匹配名称含温度二字的变量；写「=温度」只匹配名称一字不差的变量；带「*」按片段）</label>' +
+    '<label class="fl">变量名（* 全部；写法按包含；=开头 一字不差）</label>' +
     '<input id="rVar" autocomplete="off" placeholder="温度 或 =进水温度 或 *" value="' +
     esc((r.var_exact ? '=' : '') + (r.var || '*')) + '">' +
-    '<div class="muted tiny" id="rVarHint" style="margin-top:5px;line-height:1.6"></div>' +
-    /* 【v0.38h】用户原话：「输入『温度』就会命中进水回水供水温度要怎么描述，
-       让『进水温度』只筛一字不差的变量又该怎么写，功能实现了就写好说明」。
-       功能 v0.38g 已落地（matchVarName + var_exact），缺的是能照着填的例子，
-       所以说明改成「填什么 → 命中什么」的短句，不再只讲模式名。 */
-    '<div class="muted tiny" style="margin-top:5px;line-height:1.7">' +
-    '写「温度」：名字里含这两个字的都算 —— 进水温度、回水温度、供水温度都会命中，' +
-    '「风机化霜出水温度」也会带进来。<br>' +
-    '写「=进水温度」：只认全名一字不差的那个变量，' +
-    '「进水温度T2」「风机化霜出水温度」都不算。<br>' +
-    '写「*」：全部变量，不筛。带 * 的词按片段算，' +
-    '如「供*T1」命中含「供」或含「T1」的变量。</div>' +
+    '<div class="muted tiny rHit" id="rVarHit"></div>' +
     '<label class="fl">条件</label><div class="row">' +
     '<select id="rOp" style="width:44%">' +
     OPS.map(function (o) {
@@ -1290,30 +1375,10 @@ function editRule(idx) {
     });
   }
 
-  /* 【v0.38g】= 提示符不能只藏在说明里：用户填到一半就该看见自己
-     到底开着「完全一致」还是「部分包含」，不用去猜后端怎么判。 */
-  var rVarEl = el('rVar');
-  if (rVarEl) {
-    var paintVarHint = function () {
-      var v = (rVarEl.value || '').trim();
-      var hint = el('rVarHint');
-      if (!hint) return;
-      if (!v || v === '*') {
-        hint.textContent = '当前：全部变量';
-      } else if (v.charAt(0) === '=') {
-        var exact = v.slice(1).trim();
-        hint.textContent = exact
-          ? '当前：完全一致，只认「' + exact + '」这一个变量名'
-          : '当前：= 后面还没写变量名';
-      } else if (v.indexOf('*') >= 0) {
-        hint.textContent = '当前：片段匹配，* 分开的词命中任一个即可';
-      } else {
-        hint.textContent = '当前：部分包含，名字里含「' + v + '」就行';
-      }
-    };
-    rVarEl.oninput = paintVarHint;
-    paintVarHint();
-  }
+  /* 【v0.40.04】三个框都实时预览：功能说明 + 实际命中清单。 */
+  bindRuleHit('rAcc', 'rAccHit', 'acc', '账号');
+  bindRuleHit('rDev', 'rDevHit', 'dev', '设备');
+  bindRuleHit('rVar', 'rVarHit', 'var', '变量');
 
 /* 【v0.26】切到「介于」时显示上限输入框，并更新提示语与 placeholder。
      【v0.27】placeholder 动态切：区间类第一个框是「下限」，其余是「阈值」。

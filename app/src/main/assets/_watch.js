@@ -4,6 +4,12 @@ var IVS = [
   { v: 3600, t: '1小时' }
 ];
 var kwWatch = '';
+/* 【v0.40.04 补丁】每台设备自己的「变量搜索词」，key = 设备号|账号（同 rfk）。
+   展开区每 3 秒可能被 patchDevList 重建，搜索词不能留在输入框里，
+   否则一刷新就丢、还打断中文输入法。存这里，重建时回填。
+   只筛当前这台的变量，不跨设备、不影响上面的设备列表搜索框。 */
+var VARQ = {};
+function varqKey(d) { return String(d && d.no) + '|' + String((d && d.acc) || ''); }
 /* 统计条筛选状态：''=不筛，online/stale/offline/blank=按状态筛。
    和搜索框是「与」的关系：先按状态筛，再按关键词筛。 */
 var stFilter = '';
@@ -400,6 +406,7 @@ function varsBody(d) {
      而小程序里明明有数 —— 只能得出「软件坏了」或「站点掉了」。
      刷新中不显示（那期间上面的文案已经是进度）。 */
   var noteTxt = (!rf && d.note) ? String(d.note) : '';
+  var q = VARQ[varqKey(d)] || '';
   return '<div class="row" style="margin:2px 0 6px">' +
     /* 【v0.32】「刷新这台」从展开区左下挪到右上：展开后第一眼就看到，
        不用穿过整张变量表滚到底才找得到。数据时间留在按钮左边同排。
@@ -409,9 +416,14 @@ function varsBody(d) {
     '<button class="sm" data-dvrf="' + esc(d.no) + '" data-dvacc="' + esc(d.acc) + '"' +
     (rf ? ' disabled' : '') + '>' +
     (rf ? '刷新中…' : '⟳ 刷新这台') + '</button></div>' +
+    /* 【v0.40.04 补丁】只搜当前这台的变量。data-varq 带设备 key，
+       输入走 document 级 input 委托：只隐藏不匹配的行，绝不重建这一块，
+       否则每敲一个字输入框就没了、中文输入法也会断。 */
+    '<input data-varq="' + esc(varqKey(d)) + '" placeholder="搜索这台的变量"' +
+    ' value="' + esc(q) + '" autocomplete="off">' +
     (noteTxt ? '<div class="tiny" data-dvnote="' + esc(d.no) + '"' +
       ' style="color:#d98a00;margin:0 0 6px;line-height:1.45">' + esc(noteTxt) + '</div>' : '') +
-    rowsTable(d.rows, d);
+    rowsTable(d.rows, d, q);
 }
 
 /* 点开某台设备时才把它的变量表填进去。
@@ -721,34 +733,55 @@ function splitVal(v) {
   return { num: s, unit: '' };
 }
 
-function rowsTable(rows, d) {
+/* 【v0.40.04 补丁】变量搜索：只按变量名筛（不含数值/时间），跟设备列表搜索分开。
+   抽成纯函数，渲染和输入时的就地过滤共用同一口径 —— 否则会出现
+   「首次渲染命中 3 个、敲一个字后命中 2 个」这种两处算法不一致的怪事。 */
+function varHit(name, q) {
+  if (!q) return true;
+  return String(name == null ? '' : name).toLowerCase().indexOf(q.toLowerCase()) >= 0;
+}
+
+function rowsTable(rows, d, q) {
   if (!rows || !rows.length) return '<div class="muted tiny">无变量数据</div>';
+  q = q || '';
   /* 只有存在可调变量时才多出「操作」这一列 ——
      整台都只读的设备不用白白占掉手机上一列宽度。 */
   var any = rows.some(canAdjust);
   var acc = d ? esc(d.acc) : '';
   var no = d ? esc(d.no) : '';
-  return '<table class="tb"><tr><th>变量</th><th>当前值</th><th>数据时间</th>' +
-    (any ? '<th style="text-align:right">操作</th>' : '') + '</tr>' +
-    rows.map(function (x) {
-      var m = varMeta(x);
-      var cell = '';
-      if (canAdjust(x)) {
-        cell = '<td style="text-align:right"><button class="sm" data-setvar="' + esc(x[0]) +
-          '" data-setrel="' + esc(m.rel) + '" data-setacc="' + acc +
-          '" data-setno="' + no + '" data-setshow="' + esc(x[1]) + '">调整</button></td>';
-      } else if (any) {
-        cell = '<td style="text-align:right" class="tiny muted">只读</td>';
-      }
-      return '<tr><td>' + esc(x[0]) + '</td>' +
-        '<td><b>' + esc(x[1]) + '</b>' +
-        /* 【v0.32】单变量刷新：只拉这台设备、就地更新这一行的值和时间。
-           每行都有（与可写与否无关），带 data-vr 由事件委托处理。 */
-        '<button class="vr" data-vr="' + esc(x[0]) + '" data-vracc="' + acc +
-        '" data-vrno="' + no + '">⟳</button></td>' +
-        '<td class="tiny">' +
-        esc(String(x[2] || '-').replace('T', ' ').slice(5, 16)) + '</td>' + cell + '</tr>';
-    }).join('') + '</table>' +
+  var hit = 0;
+  var body = rows.map(function (x) {
+    var ok = varHit(x[0], q);
+    if (ok) hit++;
+    var m = varMeta(x);
+    var cell = '';
+    if (canAdjust(x)) {
+      cell = '<td style="text-align:right"><button class="sm" data-setvar="' + esc(x[0]) +
+        '" data-setrel="' + esc(m.rel) + '" data-setacc="' + acc +
+        '" data-setno="' + no + '" data-setshow="' + esc(x[1]) + '">调整</button></td>';
+    } else if (any) {
+      cell = '<td style="text-align:right" class="tiny muted">只读</td>';
+    }
+    /* 行带 data-vn 供输入时就地隐藏；不匹配的行 initial 就带 hide 类。
+       不重建行、只切 class —— 输入框不会失焦，中文输入法不会被打断。 */
+    return '<tr data-vn="' + esc(x[0]) + '"' + (ok ? '' : ' class="vhide"') + '><td>' +
+      esc(x[0]) + '</td>' +
+      '<td><b>' + esc(x[1]) + '</b>' +
+      /* 【v0.32】单变量刷新：只拉这台设备、就地更新这一行的值和时间。
+         每行都有（与可写与否无关），带 data-vr 由事件委托处理。 */
+      '<button class="vr" data-vr="' + esc(x[0]) + '" data-vracc="' + acc +
+      '" data-vrno="' + no + '">⟳</button></td>' +
+      '<td class="tiny">' +
+      esc(String(x[2] || '-').replace('T', ' ').slice(5, 16)) + '</td>' + cell + '</tr>';
+  }).join('');
+  /* 命中提示常驻（q 为空时隐藏），这样输入时 applyVarFilter 能就地改它，
+     不用重建整块。模糊匹配见 varHit：不区分大小写的包含。 */
+  var tip = '<div class="tiny muted" data-varhit style="margin:5px 0 2px"' +
+    (q ? '' : ' hidden') + '>' +
+    (q ? (hit ? '命中 ' + hit + ' 个变量' : '没找到含「' + esc(q) + '」的变量') : '') +
+    '</div>';
+  return tip + '<table class="tb"><tr><th>变量</th><th>当前值</th><th>数据时间</th>' +
+    (any ? '<th style="text-align:right">操作</th>' : '') + '</tr>' + body + '</table>' +
     (any ? '<div class="tiny muted" style="margin-top:6px">' +
       '「调整」的变量可以下发新值到设备；「只读」是平台上没开放写入、' +
       '或当前账号没有操作权限的变量。</div>' : '');
@@ -1004,6 +1037,37 @@ function bindDevRows() {
        三样必须一起变，否则会出现「张着但空白」或「收起还留着旧表」。 */
     if (on) openDevRow(row); else closeDevRow(row);
   });
+  /* 【v0.40.04 补丁】站点内变量搜索：只隐藏行、改命中提示，绝不重建展开区。
+     document 级绑一次，跟 click 委托一样只认 #devList 内的框。 */
+  document.addEventListener('input', function (e) {
+    var t = e.target;
+    if (!t || !t.getAttribute) return;
+    var key = t.getAttribute('data-varq');
+    if (key == null) return;
+    var box = el('devList');
+    if (!box || !box.contains(t)) return;
+    VARQ[key] = t.value || '';
+    applyVarFilter(t.closest('.vars'), key, t.value || '');
+  });
+}
+
+/* 就地应用变量过滤：切行 class + 改命中提示文字，不碰输入框本身。
+   和 rowsTable 首渲染共用 varHit，口径一致。 */
+function applyVarFilter(vbox, key, q) {
+  if (!vbox) return;
+  var hit = 0, total = 0;
+  vbox.querySelectorAll('tr[data-vn]').forEach(function (tr) {
+    total++;
+    var ok = varHit(tr.getAttribute('data-vn'), q);
+    if (ok) hit++;
+    if (ok) tr.classList.remove('vhide'); else tr.classList.add('vhide');
+  });
+  var tip = vbox.querySelector('[data-varhit]');
+  if (tip) {
+    tip.textContent = q
+      ? (hit ? '命中 ' + hit + ' 个变量' : '没找到含「' + q + '」的变量') : '';
+    if (q) tip.removeAttribute('hidden'); else tip.setAttribute('hidden', '');
+  }
 }
 
 /* ================= 【v0.32】长按站名复制 =================

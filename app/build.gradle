@@ -16,8 +16,8 @@ android {
         applicationId "org.usrcloud.xunjian"
         minSdk 21
         targetSdk 33
-        versionCode 10344
-        versionName "0.40.04"
+        versionCode 10345
+        versionName "0.40.05"
         buildConfigField "String", "BUILD_STAMP", "\"${buildStamp}\""
     }
 

@@ -78,6 +78,8 @@ input,select{font-family:inherit;font-size:14px;border:1px solid #dde1e8;border-
   padding:9px 10px;background:#fff;color:#1a1d22;width:100%}
 input:focus,select:focus{outline:none;border-color:#2b62e0}
 label.fl{display:block;font-size:12.5px;color:#6b7382;margin:10px 0 5px}
+/* 【v0.40.04】规则输入框下的实时命中提示：留 6px 间距，命中的数字用蓝色强调 */
+.rHit{margin-top:6px;line-height:1.6;min-height:16px}
 .pill{display:inline-block;padding:2px 8px;border-radius:11px;font-size:11.5px;font-weight:500}
 .pill.g{background:#e6f6ec;color:#1a7f37}
 .pill.y{background:#fff4e0;color:#a86a00}
@@ -199,6 +201,11 @@ table.tb td{padding:6px 4px;border-top:1px solid #f1f3f7}
   -webkit-touch-callout:none}
 .dv .vars{display:none;padding:6px 0 2px}
 .dv.open .vars{display:block}
+/* 【v0.40.04 补丁】站点内变量搜索：输入框比全局 input 矮一圈，
+   不匹配的变量行只藏不删（!important 压过 .dv.open 的显示规则）。 */
+.dv .vars input[data-varq]{padding:6px 8px;font-size:12.5px;margin-bottom:5px}
+.dv .vars tr.vhide{display:none!important}
+.dv .vars [data-varhit][hidden]{display:none!important}
 .dv table{width:100%;font-size:12px}
 .dv table td{padding:3px 4px;color:#5c6472}
 /* 【v0.32】单变量刷新小按钮：跟在当前值后面，不抢地方 */
@@ -281,7 +288,7 @@ table.tb td{padding:6px 4px;border-top:1px solid #f1f3f7}
 </head>
 <body>
 <div id="hd">
-  <span class="ver" id="hver">v0.40.03</span>
+  <span class="ver" id="hver">v0.40.05</span>
   <h1 id="htitle">有人云巡站</h1>
   <p id="hsub">铁路站点水电巡检 · 一键截图</p>
 </div>
