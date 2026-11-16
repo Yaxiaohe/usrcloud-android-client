@@ -16,6 +16,8 @@ import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -26,14 +28,18 @@ import java.util.concurrent.Executors;
  * <p>更新源是项目主页的 Releases：公开仓库，不登录、没有清单文件，
  * 版本号就是发布时的 tag，安装包就是那条发布里的 .apk。
  *
- * <p>三条硬约束（改之前先看清楚）：
+ * <p>四条硬约束（改之前先看清楚）：
  * <ol>
  *   <li><b>不许同步拉网</b>。Android.call 是 @JavascriptInterface 同步调用，
  *       在桥里发 HTTP 会把页面冻住。检查和下载都是「Start 起线程 + Poll 轮询」两段式，
  *       前端每 600ms 问一次，和单台重拍 reshootStart/reshootPoll 一个套路。</li>
  *   <li><b>必须带浏览器 UA</b>。默认 UA 会被一些网关直接挡成 403，
  *       登录接口能过、读文件却过不去，很难查。</li>
- *   <li><b>下载完必须核对摘要</b>。摘要对不上就删包，绝不交给安装器。</li>
+ *   <li><b>要有第二条路</b>。项目主页在海外，手机网络下直连被中断是常态
+ *       （同一个 WiFi 上电脑能通、手机不通很常见）。直连不通就换一条公众镜像，
+ *       并把走通过的那条记下来，下次先试它。两条都走不通才算失败。</li>
+ *   <li><b>下载完必须核对摘要</b>。摘要对不上就删包，绝不交给安装器。
+ *       换了镜像也一样 —— 镜像只搬字节，正确性由摘要保。</li>
  * </ol>
  *
  * <p>查哪个仓库只写在 assets/update.conf 里（打包时注入），
@@ -44,13 +50,38 @@ public final class Update {
     private Update() {
     }
 
-    /* 项目主页在海外，5 秒连不上就放弃会误判成「没网」：
-       检查给 20 秒，下载给 60 秒。 */
-    private static final int T_CHECK = 20000;
+    /* 每条线路的连接/读超时。原来一次给 20 秒，现在要试两条路，
+       单条缩到 7 秒：两条都死也只等 14 秒，网页那边等得住。 */
+    private static final int T_CHECK = 7000;
+    private static final int T_CONN = 12000;
     private static final int T_DL = 60000;
+
     private static final String UA = "Mozilla/5.0 (Linux; Android 13) "
             + "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36";
-    private static final String API = "https://api.github.com/repos/";
+
+    /**
+     * 一条线路：api 用来查发布，dl 用来下载。
+     * dl 为空表示「就用发布里给的原始地址」；非空时把原始地址接在它后面走镜像。
+     */
+    private static final class Ep {
+        final String api;
+        final String dl;
+
+        Ep(String api, String dl) {
+            this.api = api;
+            this.dl = dl;
+        }
+    }
+
+    /* 第一条是直连，第二条是公众镜像。顺序会按上次走通的那条调整。 */
+    private static final Ep[] EPS = {
+            new Ep("https://api.github.com/repos/", ""),
+            new Ep("https://gh-proxy.com/https://api.github.com/repos/",
+                    "https://gh-proxy.com/"),
+    };
+
+    /** 上次走通的线路号，存成一个小文本文件；读不出来就当直连。 */
+    private static final String EP_FILE = "update_ep.txt";
 
     private static final ExecutorService POOL = Executors.newSingleThreadExecutor();
 
@@ -62,12 +93,12 @@ public final class Update {
     /** 这次查到的发布：下载必须沿用同一条，不能半路换地址。 */
     private static final class Probe {
         String url = "";
+        String dlPrefix = "";
         String name = "";
         String sha256 = "";
         String version = "";
         String notes = "";
         long size = 0;
-        int timeout = T_CHECK;
     }
 
     private static volatile Probe active = null;
@@ -76,6 +107,25 @@ public final class Update {
     private static final class SoftError extends Exception {
         SoftError(String m) {
             super(m);
+        }
+    }
+
+    /** 所有线路都试完了还是不通；kind 决定给用户看哪句话。 */
+    private static final class Fail extends Exception {
+        final int kind;
+
+        Fail(int kind) {
+            this.kind = kind;
+        }
+    }
+
+    /** 线路给了非 2xx，要看状态码才知道该换线路还是该换说法。 */
+    private static final class HttpError extends Exception {
+        final int code;
+
+        HttpError(int code, String msg) {
+            super(msg);
+            this.code = code;
         }
     }
 
@@ -196,6 +246,43 @@ public final class Update {
         }
     }
 
+    /* ---- 线路选择：记住上次走通的那条 ---- */
+
+    private static int epRead(Context app) {
+        try {
+            File f = new File(app.getFilesDir(), EP_FILE);
+            if (!f.isFile()) return 0;
+            int i = Integer.parseInt(new String(readAll(new FileInputStream(f)), "UTF-8").trim());
+            return (i >= 0 && i < EPS.length) ? i : 0;
+        } catch (Throwable e) {
+            return 0;
+        }
+    }
+
+    private static void epSave(Context app, int i) {
+        try {
+            FileOutputStream fo = new FileOutputStream(new File(app.getFilesDir(), EP_FILE), false);
+            try {
+                fo.write(String.valueOf(i).getBytes("UTF-8"));
+            } finally {
+                fo.close();
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 上次走通的那条排最前，其余按原顺序跟在后面。 */
+    private static int[] epOrder(Context app) {
+        int good = epRead(app);
+        int[] r = new int[EPS.length];
+        r[0] = good;
+        int k = 1;
+        for (int i = 0; i < EPS.length; i++) {
+            if (i != good) r[k++] = i;
+        }
+        return r;
+    }
+
     /** 当前装的版本名，用来和发布页的 tag 比。 */
     private static String curName(Context ctx) {
         try {
@@ -215,35 +302,27 @@ public final class Update {
         return bo.toByteArray();
     }
 
-    private static HttpURLConnection open(String url, String method, String token, int timeout)
+    private static HttpURLConnection open(String url, String method, int connMs, int readMs)
             throws Exception {
         HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
-        c.setConnectTimeout(timeout);
-        c.setReadTimeout(timeout);
+        c.setConnectTimeout(connMs);
+        c.setReadTimeout(readMs);
         c.setRequestMethod(method);
         c.setInstanceFollowRedirects(true);
         c.setRequestProperty("User-Agent", UA);
         c.setRequestProperty("Accept", "application/json, text/plain, */*");
-        if (token != null && !token.isEmpty()) c.setRequestProperty("Authorization", token);
         return c;
     }
 
-    private static String http(String url, String method, String body, String token, int timeout)
-            throws Exception {
-        HttpURLConnection c = open(url, method, token, timeout);
+    private static String get(String url, int connMs, int readMs) throws Exception {
+        HttpURLConnection c = open(url, "GET", connMs, readMs);
         try {
-            if (body != null) {
-                c.setDoOutput(true);
-                c.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-                java.io.OutputStream os = c.getOutputStream();
-                os.write(body.getBytes("UTF-8"));
-                os.close();
-            }
             int code = c.getResponseCode();
             InputStream in = (code >= 200 && code < 300) ? c.getInputStream() : c.getErrorStream();
             String s = in == null ? "" : new String(readAll(in), "UTF-8");
             if (code < 200 || code >= 300) {
-                throw new Exception("HTTP " + code + " " + s.substring(0, Math.min(60, s.length())));
+                throw new HttpError(code, "HTTP " + code + " "
+                        + s.substring(0, Math.min(60, s.length())));
             }
             return s;
         } finally {
@@ -255,18 +334,8 @@ public final class Update {
      * 读项目主页上最新的一条发布：版本号取 tag，安装包取那条里的 .apk。
      * 只读第一个带 .apk 的附件，发布时不要挂多个安装包。
      */
-    private static Probe probe(Map<String, String> cf, int timeout) throws Exception {
-        String repo = cf.get("repo");
-        if (!UpdateCheck.safeRepo(repo)) throw new SoftError("这个版本没配好更新地址");
-
-        String body;
-        try {
-            body = http(API + repo.trim() + "/releases/latest", "GET", null, null, timeout);
-        } catch (Exception e) {
-            String m = String.valueOf(e.getMessage());
-            if (m.contains("HTTP 404")) throw new SoftError("项目主页上还没有发布版本");
-            throw e;
-        }
+    private static Probe probeOne(String repo, Ep ep) throws Exception {
+        String body = get(ep.api + repo + "/releases/latest", T_CHECK, T_CHECK);
         JSONObject j = new JSONObject(body);
         String tag = j.optString("tag_name", "");
         if (tag.isEmpty()) throw new SoftError("发布页上没读到版本号");
@@ -284,7 +353,7 @@ public final class Update {
         if (pick == null) throw new SoftError("这个版本还没挂安装包");
 
         Probe p = new Probe();
-        p.timeout = timeout;
+        p.dlPrefix = ep.dl;
         p.url = pick.optString("browser_download_url", "");
         p.name = pick.optString("name", "");
         p.sha256 = UpdateCheck.digestHex(pick.optString("digest", ""));
@@ -293,6 +362,41 @@ public final class Update {
         p.notes = UpdateCheck.plainNotes(j.optString("body", ""));
         if (!UpdateCheck.aUrl(p.url)) throw new SoftError("安装包地址不可用");
         return p;
+    }
+
+    /**
+     * 按线路顺序试。直连走不通就换镜像；镜像查到了，下载也走镜像。
+     * 404 只在直连那一次算「真没发布」—— 镜像对不认识的路径也回 404，
+     * 不能拿它当结论。
+     */
+    private static Probe probe(Context app, Map<String, String> cf) throws Exception {
+        String repo = cf.get("repo");
+        if (!UpdateCheck.safeRepo(repo)) throw new SoftError("这个版本没配好更新地址");
+        repo = repo.trim();
+
+        int kind = 0;
+        boolean saw404 = false;
+        for (int idx : epOrder(app)) {
+            try {
+                Probe p = probeOne(repo, EPS[idx]);
+                epSave(app, idx);
+                return p;
+            } catch (SoftError se) {
+                throw se;
+            } catch (HttpError he) {
+                if (he.code == 404) {
+                    if (idx == 0) throw new SoftError("项目主页上还没有发布版本");
+                    saw404 = true;
+                    kind = 3;
+                    continue;
+                }
+                kind = (he.code == 403 || he.code == 429) ? 2 : 0;
+            } catch (Exception e) {
+                kind = timeoutLike(e) ? 1 : 0;
+            }
+        }
+        if (saw404 && kind == 3) throw new SoftError("项目主页上还没有发布版本");
+        throw new Fail(kind);
     }
 
     private static boolean timeoutLike(Throwable e) {
@@ -319,7 +423,7 @@ public final class Update {
                 Map<String, String> cf = conf(app);
                 if (!UpdateCheck.configured(cf)) throw new SoftError("这个版本没有在线更新");
 
-                Probe p = probe(cf, T_CHECK);
+                Probe p = probe(app, cf);
                 boolean newer = UpdateCheck.versionNewer(curName(app), p.version);
 
                 active = p;
@@ -332,8 +436,13 @@ public final class Update {
                 jput(out, "notes", p.notes);
             } catch (Throwable e) {
                 jput(out, "ok", false);
-                jput(out, "hint", (e instanceof SoftError)
-                        ? String.valueOf(e.getMessage()) : UpdateCheck.failureHint(timeoutLike(e)));
+                if (e instanceof SoftError) {
+                    jput(out, "hint", String.valueOf(e.getMessage()));
+                } else if (e instanceof Fail) {
+                    jput(out, "hint", UpdateCheck.failureHint(((Fail) e).kind));
+                } else {
+                    jput(out, "hint", UpdateCheck.failureHint(timeoutLike(e) ? 1 : 0));
+                }
             }
             jput(out, "running", false);
             checkTask = out;
@@ -345,6 +454,43 @@ public final class Update {
         JSONObject o = checkTask;
         if (o != null) return o;
         return jput(jput(new JSONObject(), "ok", false), "running", false);
+    }
+
+    /** 先走查到发布时那条线路，再换另一条；两条地址一样时只试一次。 */
+    private static List<String> dlUrls(Probe p) {
+        List<String> l = new ArrayList<>();
+        String a = p.dlPrefix + p.url;
+        l.add(a);
+        String b = (p.dlPrefix.isEmpty() ? EPS[1].dl : "") + p.url;
+        if (!b.equals(a)) l.add(b);
+        return l;
+    }
+
+    /** 把 url 下到 f，边下边更新百分比。连不上/被中断都会抛异常，由调用方换线路。 */
+    private static void fetch(String url, File f) throws Exception {
+        HttpURLConnection c = open(url, "GET", T_CONN, T_DL);
+        try {
+            int code = c.getResponseCode();
+            if (code < 200 || code >= 300) throw new HttpError(code, "HTTP " + code);
+            long total = c.getContentLength();
+            InputStream in = c.getInputStream();
+            FileOutputStream fo = new FileOutputStream(f);
+            try {
+                byte[] buf = new byte[16384];
+                int n;
+                long done = 0;
+                while ((n = in.read(buf)) > 0) {
+                    fo.write(buf, 0, n);
+                    done += n;
+                    dlProgress = total > 0 ? (int) (done * 100 / total) : -1;
+                }
+            } finally {
+                fo.close();
+                in.close();
+            }
+        } finally {
+            c.disconnect();
+        }
     }
 
     /** 起后台下载。返回 null = 已开始；非 null = 没开始的原因。 */
@@ -365,31 +511,22 @@ public final class Update {
                 /* 下载新版前把攒下的旧包清掉，只留本次要下的这一个。 */
                 cleanOldApks(app, p.name);
                 f = new File(dir, p.name);
-                if (f.exists() && !f.delete()) throw new SoftError("旧安装包清不掉");
 
-                HttpURLConnection c = open(p.url, "GET", null, T_DL);
-                try {
-                    int code = c.getResponseCode();
-                    if (code < 200 || code >= 300) throw new Exception("HTTP " + code);
-                    long total = c.getContentLength();
-                    InputStream in = c.getInputStream();
-                    FileOutputStream fo = new FileOutputStream(f);
+                Exception last = null;
+                for (String url : dlUrls(p)) {
                     try {
-                        byte[] buf = new byte[16384];
-                        int n;
-                        long done = 0;
-                        while ((n = in.read(buf)) > 0) {
-                            fo.write(buf, 0, n);
-                            done += n;
-                            dlProgress = total > 0 ? (int) (done * 100 / total) : -1;
-                        }
-                    } finally {
-                        fo.close();
-                        in.close();
+                        if (f.exists() && !f.delete()) throw new SoftError("旧安装包清不掉");
+                        dlProgress = -1;
+                        fetch(url, f);
+                        last = null;
+                        break;
+                    } catch (SoftError se) {
+                        throw se;
+                    } catch (Exception e) {
+                        last = e;
                     }
-                } finally {
-                    c.disconnect();
                 }
+                if (last != null) throw last;
 
                 /* 摘要给了就核对摘要；没给就退一步核对大小。两条都过不去就删包。 */
                 if (!p.sha256.isEmpty()) {

@@ -275,7 +275,7 @@ function V_me() {
   /* 关于 */
   s += '<div class="card"><h2>关于</h2>' +
     '<div class="row tiny muted"><span>应用</span><span class="sp"></span>' +
-    '<span>有人云巡站 v' + esc(h.version || '0.40.03') + '</span></div>' +
+    '<span>有人云巡站 v' + esc(h.version || '0.40.04') + '</span></div>' +
     /* 【v0.36 修订五】版本号一直停在 0.36，光看版本分不清装的是哪一次打包的包。
        这里把编译时刻摆出来，出问题时对着它一看就知道该不该重装。 */
     '<div class="row tiny muted" style="margin-top:7px"><span>编译</span><span class="sp"></span>' +
@@ -372,7 +372,8 @@ function updCheckPoll(n, silent) {
   setTimeout(function () {
     var r = api('updateCheckPoll', {});
     if (r.running) {
-      if (n < 40) updCheckPoll(n + 1, silent);
+      /* 后端会按两条线路各试一次，最坏 14 秒左右；这里放宽到 45 次。 */
+      if (n < 45) updCheckPoll(n + 1, silent);
       else if (!silent) toast('检查超时，请稍后再试');
       return;
     }
@@ -380,8 +381,6 @@ function updCheckPoll(n, silent) {
       if (!silent) toast(r.hint || '检查更新失败');
       return;
     }
-    /* 主地址连不上、备用地址顶上时才提示；更新本身不中断。 */
-    if (r.switchHint && !silent) toast(r.switchHint);
     if (!r.newer) {
       if (!silent) toast('已是最新版本 v' + (r.version || (G.health || {}).version || ''));
       return;
@@ -447,7 +446,8 @@ function updDownloadPoll(n) {
       pg.textContent = r.progress >= 0 ? '下载中 ' + r.progress + '%' : '下载中…';
     }
     if (r.running) {
-      if (n < 200) updDownloadPoll(n + 1);
+      /* 下载失败会换另一条线路再下一遍，最坏两三分钟；这里放宽到 260 次。 */
+      if (n < 260) updDownloadPoll(n + 1);
       else toast('下载超时，请检查网络后重试');
       return;
     }
@@ -1200,12 +1200,12 @@ function editRule(idx) {
       return '<div class="op' + (r.kind === k.v ? ' on' : '') + '" data-kind="' + k.v + '">' +
         '<span>' + k.t + '</span><span class="ck">' + (r.kind === k.v ? '✓' : '') + '</span></div>';
     }).join('') + '</div>' +
-    /* 【v0.40.03】三栏说明统一成「举例」格式：填什么 → 命中什么。
-       Java 侧 matchRuleField 已同步成默认包含、= 一字不差、* 片段通配，
-       说明与行为一一对应（填「某线路」就真能命中名称含某线路的那一批）。 */
-    '<label class="fl">账号（举例：「*」全部账号；「某线路」只匹配名称中有某线路二字的账号；「=某线路」只匹配名称一字不差的账号）</label>' +
+    /* 【v0.40.04】三栏说明改成和 Windows 版同一句式「写什么 → 只匹配什么」。
+       上一版写成了名词短语（「名称中包含某线路二字的设备」），看不出是规则，
+       设备名那一句连动词都没有；* 片段规则也漏了。口径与 Java matchRuleField 一致。 */
+    '<label class="fl">账号（「*」全部账号；写「某线路」只匹配名称含某线路二字的账号；写「=某线路」只匹配名称一字不差的账号；带「*」按片段）</label>' +
     '<input id="rAcc" value="' + esc(r.acc || '*') + '">' +
-    '<label class="fl">设备名（举例：「*」全部设备；「某线路」名称中包含某线路二字的设备；「=某线路」一字不差的设备）</label>' +
+    '<label class="fl">设备名（「*」全部设备；写「某线路」只匹配名称含某线路二字的设备；写「=某线路」只匹配名称一字不差的设备；带「*」按片段）</label>' +
     '<input id="rDev" value="' + esc(r.dev || '*') + '">' +
     '<div id="rStaleBox"' + (r.kind === 'stale' ? '' : ' style="display:none"') + '>' +
     '<label class="fl">停更超过（分钟）</label>' +
@@ -1216,7 +1216,7 @@ function editRule(idx) {
        默认部分包含，在说明中写好」。片段通配功能本身没问题，一个字没动。
        输入框顺手关掉自动填充：真机上输入「进水温度」会弹出历史候选
        （比如「风机化霜出水温度」）挡住半个弹窗，点一下就填错变量。 */
-    '<label class="fl">变量名（举例：「*」全部变量；「温度」名称中包含温度二字的变量；「=温度」一字不差的变量）</label>' +
+    '<label class="fl">变量名（「*」全部变量；写「温度」只匹配名称含温度二字的变量；写「=温度」只匹配名称一字不差的变量；带「*」按片段）</label>' +
     '<input id="rVar" autocomplete="off" placeholder="温度 或 =进水温度 或 *" value="' +
     esc((r.var_exact ? '=' : '') + (r.var || '*')) + '">' +
     '<div class="muted tiny" id="rVarHint" style="margin-top:5px;line-height:1.6"></div>' +

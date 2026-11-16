@@ -112,14 +112,22 @@ public final class UpdateCheck {
     }
 
     /**
-     * 失败提示。只说「连不上」和「怎么办」，不出现任何地址、账号或内部编号。
-     * 超时和连不上分开说：前者多半是网慢，后者多半是被挡了，处理办法不一样。
+     * 失败提示。只说现象和怎么办，不出现任何地址、账号或内部编号。
+     * 三种情况分开说，因为处理办法不一样：
+     * <ul>
+     *   <li>0 连不上：多半是被挡了，换网络（换 WiFi / 换流量）最有效；</li>
+     *   <li>1 超时：网慢或线路抽风，过一会儿再点；</li>
+     *   <li>2 被拒绝：对方嫌访问太频繁，等几小时自然恢复。</li>
+     * </ul>
      */
-    public static String failureHint(boolean timeout) {
-        if (timeout) {
+    public static String failureHint(int kind) {
+        if (kind == 1) {
             return "连接项目主页超时。换个网络再试，或者过一会儿再点。";
         }
-        return "连不上项目主页。检查一下网络再试；也可以到项目主页的 Releases 里手动下载。";
+        if (kind == 2) {
+            return "项目主页暂时不让访问。过几个小时再试；也可以到项目主页的 Releases 里手动下载。";
+        }
+        return "连不上项目主页。换成流量或别的 WiFi 再试；也可以到项目主页的 Releases 里手动下载。";
     }
 
     /** 安装包名白名单：不许路径穿越，也不许塞别的文件。 */
