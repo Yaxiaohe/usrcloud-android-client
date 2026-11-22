@@ -16,8 +16,6 @@ import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -59,29 +57,11 @@ public final class Update {
     private static final String UA = "Mozilla/5.0 (Linux; Android 13) "
             + "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36";
 
-    /**
-     * 一条线路：api 用来查发布，dl 用来下载。
-     * dl 为空表示「就用发布里给的原始地址」；非空时把原始地址接在它后面走镜像。
-     */
-    private static final class Ep {
-        final String api;
-        final String dl;
-
-        Ep(String api, String dl) {
-            this.api = api;
-            this.dl = dl;
-        }
-    }
-
-    /* 第一条是直连，第二条是公众镜像。顺序会按上次走通的那条调整。 */
-    private static final Ep[] EPS = {
-            new Ep("https://api.github.com/repos/", ""),
-            new Ep("https://gh-proxy.com/https://api.github.com/repos/",
-                    "https://gh-proxy.com/"),
-    };
-
-    /** 上次走通的线路号，存成一个小文本文件；读不出来就当直连。 */
-    private static final String EP_FILE = "update_ep.txt";
+    /* check 和 download 分开选路，线路表和「把走通的排最前」都在 UpdateCheck 里。
+       为什么要分开：实测 ghfast.top 能下载但查不了 API，绑一条线路会把能用的下载源丢掉。
+       两个文件各记各的：查发布走通的那条、下载走通的那条。读不出来都当第一条。 */
+    private static final String CHECK_EP_FILE = "update_check_ep.txt";
+    private static final String DL_EP_FILE = "update_dl_ep.txt";
 
     private static final ExecutorService POOL = Executors.newSingleThreadExecutor();
 
@@ -90,10 +70,9 @@ public final class Update {
     private static volatile int dlProgress = -1;
     private static volatile File apkFile = null;
 
-    /** 这次查到的发布：下载必须沿用同一条，不能半路换地址。 */
+    /** 这次查到的发布：只留原始下载地址，下载时再按线路表逐条试。 */
     private static final class Probe {
         String url = "";
-        String dlPrefix = "";
         String name = "";
         String sha256 = "";
         String version = "";
@@ -246,22 +225,22 @@ public final class Update {
         }
     }
 
-    /* ---- 线路选择：记住上次走通的那条 ---- */
+    /* ---- 线路选择：check 和 download 各记各的 ---- */
 
-    private static int epRead(Context app) {
+    private static int epRead(Context app, String file, int n) {
         try {
-            File f = new File(app.getFilesDir(), EP_FILE);
+            File f = new File(app.getFilesDir(), file);
             if (!f.isFile()) return 0;
             int i = Integer.parseInt(new String(readAll(new FileInputStream(f)), "UTF-8").trim());
-            return (i >= 0 && i < EPS.length) ? i : 0;
+            return (i >= 0 && i < n) ? i : 0;
         } catch (Throwable e) {
             return 0;
         }
     }
 
-    private static void epSave(Context app, int i) {
+    private static void epSave(Context app, String file, int i) {
         try {
-            FileOutputStream fo = new FileOutputStream(new File(app.getFilesDir(), EP_FILE), false);
+            FileOutputStream fo = new FileOutputStream(new File(app.getFilesDir(), file), false);
             try {
                 fo.write(String.valueOf(i).getBytes("UTF-8"));
             } finally {
@@ -269,18 +248,6 @@ public final class Update {
             }
         } catch (Throwable ignored) {
         }
-    }
-
-    /** 上次走通的那条排最前，其余按原顺序跟在后面。 */
-    private static int[] epOrder(Context app) {
-        int good = epRead(app);
-        int[] r = new int[EPS.length];
-        r[0] = good;
-        int k = 1;
-        for (int i = 0; i < EPS.length; i++) {
-            if (i != good) r[k++] = i;
-        }
-        return r;
     }
 
     /** 当前装的版本名，用来和发布页的 tag 比。 */
@@ -334,8 +301,10 @@ public final class Update {
      * 读项目主页上最新的一条发布：版本号取 tag，安装包取那条里的 .apk。
      * 只读第一个带 .apk 的附件，发布时不要挂多个安装包。
      */
-    private static Probe probeOne(String repo, Ep ep) throws Exception {
-        String body = get(ep.api + repo + "/releases/latest", T_CHECK, T_CHECK);
+    private static Probe probeOne(String repo, int idx) throws Exception {
+        String url = UpdateCheck.checkUrl(repo, idx);
+        if (url.isEmpty()) throw new HttpError(0, "no route");
+        String body = get(url, T_CHECK, T_CHECK);
         JSONObject j = new JSONObject(body);
         String tag = j.optString("tag_name", "");
         if (tag.isEmpty()) throw new SoftError("发布页上没读到版本号");
@@ -353,7 +322,6 @@ public final class Update {
         if (pick == null) throw new SoftError("这个版本还没挂安装包");
 
         Probe p = new Probe();
-        p.dlPrefix = ep.dl;
         p.url = pick.optString("browser_download_url", "");
         p.name = pick.optString("name", "");
         p.sha256 = UpdateCheck.digestHex(pick.optString("digest", ""));
@@ -376,15 +344,19 @@ public final class Update {
 
         int kind = 0;
         boolean saw404 = false;
-        for (int idx : epOrder(app)) {
+        int[] order = UpdateCheck.order(epRead(app, CHECK_EP_FILE, UpdateCheck.N_CHECK),
+                UpdateCheck.N_CHECK);
+        for (int idx : order) {
             try {
-                Probe p = probeOne(repo, EPS[idx]);
-                epSave(app, idx);
+                Probe p = probeOne(repo, idx);
+                epSave(app, CHECK_EP_FILE, idx);
                 return p;
             } catch (SoftError se) {
                 throw se;
             } catch (HttpError he) {
                 if (he.code == 404) {
+                    /* 只有直连 API（线路 0）的 404 才算「真没发布」——
+                       镜像对不认识的路径也回 404，不能拿它当结论。 */
                     if (idx == 0) throw new SoftError("项目主页上还没有发布版本");
                     saw404 = true;
                     kind = 3;
@@ -456,16 +428,6 @@ public final class Update {
         return jput(jput(new JSONObject(), "ok", false), "running", false);
     }
 
-    /** 先走查到发布时那条线路，再换另一条；两条地址一样时只试一次。 */
-    private static List<String> dlUrls(Probe p) {
-        List<String> l = new ArrayList<>();
-        String a = p.dlPrefix + p.url;
-        l.add(a);
-        String b = (p.dlPrefix.isEmpty() ? EPS[1].dl : "") + p.url;
-        if (!b.equals(a)) l.add(b);
-        return l;
-    }
-
     /** 把 url 下到 f，边下边更新百分比。连不上/被中断都会抛异常，由调用方换线路。 */
     private static void fetch(String url, File f) throws Exception {
         HttpURLConnection c = open(url, "GET", T_CONN, T_DL);
@@ -512,12 +474,20 @@ public final class Update {
                 cleanOldApks(app, p.name);
                 f = new File(dir, p.name);
 
+                /* 下载和查发布分开选路：原始 → ghfast.top → gh-proxy 逐条试，
+                   哪条下通就记住哪条，下次先走它。实测 ghfast 下载稳定、但查不了 API，
+                   所以这里绝不能沿用查发布那条线路。 */
                 Exception last = null;
-                for (String url : dlUrls(p)) {
+                int[] order = UpdateCheck.order(epRead(app, DL_EP_FILE, UpdateCheck.N_DL),
+                        UpdateCheck.N_DL);
+                for (int idx : order) {
+                    String url = UpdateCheck.downloadUrl(p.url, idx);
+                    if (url.isEmpty()) continue;
                     try {
                         if (f.exists() && !f.delete()) throw new SoftError("旧安装包清不掉");
                         dlProgress = -1;
                         fetch(url, f);
+                        epSave(app, DL_EP_FILE, idx);
                         last = null;
                         break;
                     } catch (SoftError se) {

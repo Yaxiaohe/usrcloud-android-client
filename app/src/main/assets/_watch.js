@@ -1064,7 +1064,9 @@ function applyVarFilter(vbox, key, q) {
   });
   var tip = vbox.querySelector('[data-varhit]');
   if (tip) {
-    tip.textContent = '';
+    /* 与 rowsTable 首渲染同一套文案：有词就说命中几个 / 没找到，没词就隐藏。
+       之前这里只清空 textContent，输入后提示整段消失（用户反馈"命中了哪些没有了"）。 */
+    tip.textContent = q ? (hit ? '命中 ' + hit + ' 个变量' : '没找到含「' + esc(q) + '」的变量') : '';
     if (q) tip.removeAttribute('hidden'); else tip.setAttribute('hidden', '');
   }
 }

@@ -217,17 +217,20 @@ function bindHist() {
   drawChart();
 }
 
-/* 【v0.40.07】云端设备实时搜索：拉取平台设备清单一次并缓存，
-   输入站名/编号即时筛选，点一台直接查历史。不走后端 histDevs（那是本地 CSV）。 */
+/* 【v0.40.08】云端设备实时搜索：跨全部已启用账号拉取平台设备清单并缓存，
+   输入站名/编号即时筛选，点一台直接查历史。不走后端 histDevs（那是本地 CSV）。
+   v0.40.07 只取了 enabled 的第一个账号，所以监控页显示 95 台、这里只有 47 台。
+   每台设备记住自己所属账号（data-ca），点选后用它查历史——否则设备对了账号
+   不对，云端接口照样查不到数据。 */
 function pickCloudDevice() {
-  var acc = (G.accounts || []).filter(function (a) { return a.enabled !== false; })[0];
-  if (!acc) {
+  var accs = (G.accounts || []).filter(function (a) { return a.enabled !== false; });
+  if (!accs.length) {
     openBox('选择设备', '<div class="empty">还没有账号<br><span class="tiny">先到「我的」添加账号</span></div>', null);
     return;
   }
   function itemHtml(d) {
     return '<div class="item' + (d.no === G.histNo ? ' on' : '') + '" data-cn="' + esc(d.no) +
-      '" data-cname="' + esc(d.name || '') + '">' +
+      '" data-cname="' + esc(d.name || '') + '" data-ca="' + esc(d.acc || accs[0].name) + '">' +
       '<div class="t">' + esc(d.name || d.no) + '</div>' +
       '<div class="s mono tiny">' + esc(d.no) + '</div></div>';
   }
@@ -236,13 +239,14 @@ function pickCloudDevice() {
     if (kw) {
       var q = kw.toLowerCase();
       ds = ds.filter(function (d) {
-        return ((d.name || '') + ' ' + (d.no || '')).toLowerCase().indexOf(q) >= 0;
+        return ((d.name || '') + ' ' + (d.no || '') + ' ' + (d.acc || '')).toLowerCase().indexOf(q) >= 0;
       });
     }
     if (!ds.length) {
       return '<div class="empty">' + (kw ? '没有匹配「' + esc(kw) + '」的站点' : '云端设备清单为空') + '</div>';
     }
-    return ds.slice(0, 80).map(itemHtml).join('');
+    /* 上限放到 300：跨账号后总数会超过早先的 80，不能再截断 */
+    return ds.slice(0, 300).map(itemHtml).join('');
   }
   function paint() {
     var box = el('cdL');
@@ -251,13 +255,14 @@ function pickCloudDevice() {
     var cnt = el('cdCnt');
     if (cnt) cnt.textContent = hCloudKw
       ? ('匹配 ' + box.querySelectorAll('[data-cn]').length + ' 台')
-      : ('共 ' + (hCloudDevs || []).length + ' 台，输入站名实时筛选');
+      : ('共 ' + (hCloudDevs || []).length + ' 台 / ' + accs.length + ' 个账号，输入站名实时筛选');
     box.querySelectorAll('[data-cn]').forEach(function (n) {
       n.onclick = function () {
         G.histNo = n.getAttribute('data-cn');
         G.histName = n.getAttribute('data-cname') || '';
-        hAcc = acc.name;
-        G.histAcc = acc.name;
+        var dacc = n.getAttribute('data-ca') || accs[0].name;
+        hAcc = dacc;
+        G.histAcc = dacc;
         hDevLabel = G.histName || G.histNo;
         closeBox();
         V_hist();
@@ -282,12 +287,23 @@ function pickCloudDevice() {
   function load() {
     if (hCloudDevs) { paint(); return; }
     setTimeout(function () {
-      var r = api('histCloudDevs', { acc: acc.name });
-      hCloudDevs = (r && r.devs) || [];
+      var merged = [], seen = {}, errs = [];
+      accs.forEach(function (a) {
+        var r = api('histCloudDevs', { acc: a.name });
+        var ds = (r && r.devs) || [];
+        if (!ds.length && r && r.error) errs.push(a.name + '：' + r.error);
+        ds.forEach(function (d) {
+          if (!d || !d.no || seen[d.no]) return;   /* 设备号去重，跨账号共享的站只列一次 */
+          seen[d.no] = 1;
+          if (!d.acc) d.acc = a.name;
+          merged.push(d);
+        });
+      });
+      hCloudDevs = merged;
       paint();
       if (!hCloudDevs.length) {
         var c = el('cdCnt');
-        if (c) c.textContent = '读取失败：' + ((r && r.error) || '没有设备');
+        if (c) c.textContent = '读取失败：' + (errs.length ? errs.join('；') : '这些账号都没有设备');
       }
     }, 30);
   }

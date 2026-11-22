@@ -44,7 +44,7 @@ public class Core {
        改一处两边同时生效。 */
     public static volatile int STALE_MINUTES = 15;
     public static final int MAX_CARDS = 10;
-    public static final String APP_VERSION = "0.40.07";
+    public static final String APP_VERSION = "0.40.08";
     /* 【v0.36 修订五】打包时刻（build.gradle 注入）。
        版本号不动，光看 v0.36 分不清装的是哪一次打包的包，这个问题页面上要能看出来。 */
     public static final String BUILD_STAMP = BuildConfig.BUILD_STAMP;

@@ -218,6 +218,59 @@ public final class UpdateCheck {
         return sb.toString();
     }
 
+    /* ================= 更新线路：check 和 download 分开选 =================
+       实测 2026-11-22（详见工作区 _probe_update_routes*.py）：
+         check  : api.github.com 直连=200；gh-proxy=403（已失效）；api.kkgithub=000
+         download: 原始 github.com=206；ghfast.top=206（连测 3 次都通）；gh-proxy=403
+       两个结论：
+         1) 下载不能只靠原始地址 —— 手机网络下它会跳到被挡的域名，必须带 ghfast.top 备选；
+         2) check 和 download 不能绑同一条线路 —— ghfast.top 只能下载、查不了 API。
+       所以这里把两类线路各自列出来，各自记住上次走通的那条，逐条试。 */
+
+    /** check 线路条数、download 线路条数。 */
+    static final int N_CHECK = 3;
+    static final int N_DL = 3;
+
+    /** check 的第 i 条线路：读 releases/latest 的 JSON。 */
+    public static String checkUrl(String repo, int i) {
+        String r = repo == null ? "" : repo.trim();
+        switch (i) {
+            case 0:
+                return "https://api.github.com/repos/" + r + "/releases/latest";
+            case 1:
+                return "https://gh-proxy.com/https://api.github.com/repos/" + r + "/releases/latest";
+            case 2:
+                return "https://api.kkgithub.com/repos/" + r + "/releases/latest";
+            default:
+                return "";
+        }
+    }
+
+    /** download 的第 i 条线路：assetUrl 是发布里给的原始下载地址。 */
+    public static String downloadUrl(String assetUrl, int i) {
+        String u = assetUrl == null ? "" : assetUrl;
+        switch (i) {
+            case 0:
+                return u;
+            case 1:
+                return "https://ghfast.top/" + u;
+            case 2:
+                return "https://gh-proxy.com/" + u;
+            default:
+                return "";
+        }
+    }
+
+    /** 把上次走通的 good 排最前，其余按原序，返回线路号数组。good 越界时当 0。 */
+    public static int[] order(int good, int n) {
+        int g = (good >= 0 && good < n) ? good : 0;
+        int[] r = new int[n];
+        r[0] = g;
+        int k = 1;
+        for (int i = 0; i < n; i++) if (i != g) r[k++] = i;
+        return r;
+    }
+
     /**
      * 发布说明按纯文本给用户看：去掉代码块（里面多是校验值）、标题记号、
      * 加粗与反引号，列表换成圆点；太长就截断。
