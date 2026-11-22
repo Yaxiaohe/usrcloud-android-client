@@ -1064,8 +1064,7 @@ function applyVarFilter(vbox, key, q) {
   });
   var tip = vbox.querySelector('[data-varhit]');
   if (tip) {
-    tip.textContent = q
-      ? (hit ? '命中 ' + hit + ' 个变量' : '没找到含「' + q + '」的变量') : '';
+    tip.textContent = '';
     if (q) tip.removeAttribute('hidden'); else tip.setAttribute('hidden', '');
   }
 }

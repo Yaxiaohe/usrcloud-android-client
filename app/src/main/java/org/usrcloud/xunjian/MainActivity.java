@@ -1389,6 +1389,21 @@ public class MainActivity extends Activity {
                 o.put("ok", true);
                 return o;
             }
+            /* 【v0.40.07】云端历史：默认来源，走有人云 dataPoint 接口。
+               acc 用账号显示名，no 用设备编号（前端实时搜索选中后传入）。 */
+            case "histCloud": {
+                String accName = a.optString("acc", "");
+                String no = a.optString("no", "");
+                int hours = a.optInt("hours", 24);
+                return Hist.cloudHistory(accName, no, hours);
+            }
+            /* 云端设备清单（按账号），供历史页实时搜站名 */
+            case "histCloudDevs": {
+                JSONObject o = new JSONObject();
+                o.put("ok", true);
+                o.put("devs", Hist.cloudDevices(a.optString("acc", "")));
+                return o;
+            }
             case "histSave": {
                 Hist.saveNow();
                 return okSimple();

@@ -251,6 +251,199 @@ public class Hist {
         return pack(series, values, order, hours, "local");
     }
 
+    /* ==================================================================
+     * 【v0.40.07】云端历史：走有人云正式接口 history/cusdevice/dataPoint
+     *
+     * 为什么又接回来：v0.33 把它删了，理由是实测 historyData 路径 404。
+     * 后来查官方文档（cloud.usr.cn/document/823）才知道路径名写错了 ——
+     * 正确的是 dataPoint，且变量 ID 必须用 dataPointRelId（不是 dataPointId）。
+     * 2026-11-22 用真实账号实测：3 台设备 × 4 个时间范围全通，
+     * 10 变量一次查 pageSize=4999 拿到 9853 点，数据是当天实时上报的。
+     *
+     * 返回结构和 localHistory 一致（pack 出来的 vars/series/count），
+     * 前端渲染逻辑不用改。限流：平台每分钟 <=10 次，超了返回 5144。
+     * ================================================================== */
+
+    /** 历史服务地址，2 小时缓存一次（官方建议）。 */
+    private static volatile String cloudAddr = "";
+    private static volatile long cloudAddrAt = 0L;
+
+    private static String histServerAddr(String tok) throws Exception {
+        if (!cloudAddr.isEmpty() && System.currentTimeMillis() - cloudAddrAt < 2 * 3600_000L) {
+            return cloudAddr;
+        }
+        JSONObject r = Core.apiJsonForHist(Core.HIST_ADDR_URL, new JSONObject(), tok, 30);
+        if (r.optInt("status", -1) != 0) {
+            throw new RuntimeException("取历史地址失败: " + r.optString("info", r.toString()));
+        }
+        String addr = r.getJSONObject("data").optString("historyServerAddr", "");
+        if (addr.isEmpty()) throw new RuntimeException("历史地址为空");
+        cloudAddr = addr.replaceAll("/+$", "");
+        cloudAddrAt = System.currentTimeMillis();
+        return cloudAddr;
+    }
+
+    /** 限流重试：5144 时最多等 3 次，每次 20 秒（官方约 20 秒恢复）。 */
+    private static JSONObject cloudPost(String url, JSONObject body, String tok) throws Exception {
+        for (int k = 0; k < 4; k++) {
+            JSONObject r = Core.apiJsonForHist(url, body, tok, 40);
+            if (r.optInt("status") != 5144) return r;
+            if (k == 3) break;
+            Thread.sleep(20000);
+        }
+        return Core.apiJsonForHist(url, body, tok, 40);
+    }
+
+    /** 某个账号下的设备列表，供前端实时搜索站名。返回 JSONArray[{no,name}]。 */
+    public static JSONArray cloudDevices(String accName) {
+        JSONArray out = new JSONArray();
+        try {
+            Account a = null;
+            for (Account x : Core.loadAccounts()) {
+                if (x.name.equals(accName)) { a = x; break; }
+            }
+            if (a == null) return out;
+            String tok = Core.ensureLogin(a);
+            List<Core.Dev> devs = Core.getDevices(tok);
+            for (Core.Dev d : devs) {
+                JSONObject o = new JSONObject();
+                o.put("no", d.no);
+                o.put("name", d.name);
+                o.put("acc", a.name);
+                out.put(o);
+            }
+        } catch (Exception e) {
+            Core.log("[历史云] 取设备失败: " + e.getMessage());
+        }
+        return out;
+    }
+
+    /**
+     * 从云端拉一台设备的历史。hours 窗口、pageSize 4999（平台上限，5000 报 5017）。
+     * 变量 ID 用 dataPointRelId —— 用 dataPointId 会返回 status=0 但空 list，
+     * 看着像"没数据"，实际是参数错了，这个坑必须避开。
+     */
+    /** 构造一个错误返回。org.json 的 put 会抛 checked JSONException，
+        单独收口在这里，调用处不必再包 try（否则 catch 块里再 put 会编译失败）。 */
+    private static JSONObject cloudErr(String msg) {
+        JSONObject o = new JSONObject();
+        try {
+            o.put("ok", false);
+            o.put("error", msg);
+        } catch (Exception ignored) {
+        }
+        return o;
+    }
+
+    public static JSONObject cloudHistory(String accName, String devNo, int hours) {
+        try {
+            if (devNo == null || devNo.trim().isEmpty()) {
+                return cloudErr("先在上面搜索并选中一台设备");
+            }
+            Account a = null;
+            for (Account x : Core.loadAccounts()) {
+                if (x.name.equals(accName)) { a = x; break; }
+            }
+            if (a == null) {
+                return cloudErr("账号「" + accName + "」不存在");
+            }
+            String tok = Core.ensureLogin(a);
+            String addr = histServerAddr(tok);
+
+            /* 取该设备的变量定义（dataPointRelId + 单位 + 名字） */
+            JSONObject pp = new JSONObject();
+            pp.put("cusdeviceNo", devNo);
+            JSONObject pr = cloudPost(Core.POINTS_URL, pp, tok);
+            if (pr.optInt("status", -1) != 0) {
+                return cloudErr("取变量失败: " + pr.optString("info", "status=" + pr.optInt("status")));
+            }
+            JSONArray pts = pr.getJSONObject("data").optJSONArray("cusdeviceDataPointList");
+            if (pts == null || pts.length() == 0) {
+                return cloudErr("这台设备没有变量定义");
+            }
+
+            /* 一次查全部变量（实测 10 变量 × 4999 点正常） */
+            JSONArray dps = new JSONArray();
+            Map<String, String> unitByRel = new LinkedHashMap<>();
+            Map<String, String> nameByRel = new LinkedHashMap<>();
+            List<String> order = new ArrayList<>();
+            for (int i = 0; i < pts.length(); i++) {
+                JSONObject p = pts.getJSONObject(i);
+                String rel = p.optString("dataPointRelId", "");
+                if (rel.isEmpty()) continue;
+                JSONObject one = new JSONObject();
+                one.put("cusdeviceNo", devNo);
+                one.put("dataPointId", rel);
+                dps.put(one);
+                unitByRel.put(rel, p.optString("unit", ""));
+                nameByRel.put(rel, p.optString("name", "变量" + rel));
+                order.add(rel);
+            }
+            long end = System.currentTimeMillis();
+            long start = end - Math.max(1, Math.min(720, hours)) * 3600_000L;
+            JSONObject qb = new JSONObject();
+            qb.put("start", start);
+            qb.put("end", end);
+            qb.put("timeSort", "asc");
+            qb.put("pageNo", 1);
+            qb.put("pageSize", 4999);
+            qb.put("dataPoints", dps);
+            JSONObject qr = cloudPost(addr + "/history/cusdevice/dataPoint", qb, tok);
+            if (qr.optInt("status", -1) != 0) {
+                return cloudErr("云端查询失败: " + qr.optString("info", "status=" + qr.optInt("status")));
+            }
+            JSONObject data = qr.optJSONObject("data");
+            JSONArray blocks = data == null ? null : data.optJSONArray("list");
+
+            /* 填进和 localHistory 相同的结构，复用 pack 排序/去点/单位 */
+            Map<String, List<long[]>> series = new LinkedHashMap<>();
+            Map<String, List<Double>> values = new LinkedHashMap<>();
+            List<String> names = new ArrayList<>();
+            for (int i = 0; i < (blocks == null ? 0 : blocks.length()); i++) {
+                JSONObject b = blocks.getJSONObject(i);
+                String rel = b.optString("dataPointId", "");
+                JSONArray arr = b.optJSONArray("list");
+                if (arr == null || arr.length() == 0) continue;
+                String name = nameByRel.containsKey(rel) ? nameByRel.get(rel) : ("变量" + rel);
+                List<long[]> tsList = new ArrayList<>();
+                List<Double> vsList = new ArrayList<>();
+                for (int j = 0; j < arr.length(); j++) {
+                    JSONObject pt = arr.getJSONObject(j);
+                    long t = pt.optLong("time", -1L);
+                    String sv = pt.optString("value", "");
+                    Double v = Watch.parseNum(sv);
+                    if (t <= 0 || v == null) continue;
+                    tsList.add(new long[]{t, 0L});
+                    vsList.add(v);
+                }
+                if (tsList.size() < 2) continue;
+                series.put(name, tsList);
+                values.put(name, vsList);
+                if (!names.contains(name)) names.add(name);
+            }
+            JSONObject out = pack(series, values, names, hours, "cloud");
+            out.put("devNo", devNo);
+            out.put("devName", nameOf(devNo, accName));
+            return out;
+        } catch (Exception e) {
+            Core.log("[历史云] 查询异常: " + e.getMessage());
+            return cloudErr("云端查询异常: " + e.getMessage());
+        }
+    }
+
+    /** 设备显示名：从平台设备列表里找（已缓存则不再请求，找不到就用编号）。 */
+    private static String nameOf(String devNo, String accName) {
+        try {
+            JSONArray ds = cloudDevices(accName);
+            for (int i = 0; i < ds.length(); i++) {
+                JSONObject o = ds.getJSONObject(i);
+                if (devNo.equals(o.optString("no"))) return o.optString("name", devNo);
+            }
+        } catch (Exception ignored) {
+        }
+        return devNo;
+    }
+
     /**
      * 【v0.33】温度类变量排前面，其余保持原有相对顺序。
      *

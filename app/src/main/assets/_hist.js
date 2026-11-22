@@ -4,16 +4,17 @@ var HOURS = [
   { v: 168, t: '7天' }, { v: 720, t: '30天' }
 ];
 var PAL = ['#2b62e0', '#12a19a', '#d97a29', '#7c5cff', '#e0518a', '#2f9e44'];
-/* 【v0.33 修订六】移除「平台云端」来源。
-   原云端历史走 history.usr.cn:7002 的 historyData 接口，实测该路径
-   HTTP 404（平台已下线）；新控制台的多曲线历史接口
-   （new.cloudapi.usr.cn/usrCloud/datadic/getMultiCurveDataPointHistory）
-   属于另一套设备体系，本账号的设备不在其中（getDevs 为空），
-   参数结构也探不明。功能既然拉不通，留着只会让用户点了没反应 ——
-   删掉，只保留本地记录（监控自动落盘 + 导入，足够用）。 */
+/* 【v0.40.07】云端历史恢复：v0.33 曾因接口路径名写错（historyData）
+   误判"云端下线"而删除。2026-11-22 查官方文档 cloud.usr.cn/document/823
+   并用真实账号实测：正确接口是 history/cusdevice/dataPoint，
+   变量 ID 必须传 dataPointRelId。3 台设备 × 4 时间范围全通。
+   现在默认云端（快、不卡），本地 CSV 保留为备用来源。 */
 /* 【v0.28】默认 24 小时。原来默认 7 天：一是读的文件多、出图慢，
    二是 7 天的曲线挤在一起看不出细节，真要查长期趋势再点一下就好。 */
 var hHours = 24;
+var hSource = 'cloud';   // 'cloud' 默认 / 'local' 备用
+var hCloudDevs = null;   // 云端设备清单缓存 [{no,name,acc}]
+var hCloudKw = '';       // 站名搜索词
 var hOn = {};        // 变量名 -> true（勾选显示）
 /* 【v0.33 修订三】hOn 是不是已经被「确定」过。
    false = 还没人动过（刚查出来），此时全空会兜底默认前 3 条；
@@ -34,24 +35,22 @@ function V_hist() {
   /* 汇总模式：hAcc = '' 表示「全部账号」，此时后端跨账号汇总所有变量 */
   var allAcc = (hAcc === '');
 
-  /* 【v0.28】本地记录：两步出图。
-     原来要「选账号 → 读取设备 → 选设备 → 查询」四步，其中「读取设备」
-     还是走平台接口拉全量设备（耗额度，且线上有的设备本地未必有记录，
-     点进去是张空图）。现在设备列表直接从本地 CSV 里提（histDevs），
-     跨账号一次列全，点一台就出图。
-     账号不单独选了 —— 设备行里带着账号名，搜索框也能按账号搜。 */
+  /* 【v0.40.07】设备选择：输入站名实时匹配的搜索框。
+     当前选中的设备显示在框里；点框弹出搜索层，输入即筛选平台设备清单，
+     点一台直接出图。云端只查一台设备（不做跨站汇总）。 */
   s += '<div class="card"><h2>选择设备</h2>' +
     '<button class="pick" id="hPick"><span class="pf' +
     (hDevLabel ? '' : ' ph') + '">' +
-    esc(hDevLabel || '点击选择设备') + '</span><span class="ar">›</span></button>' +
-    '<div class="muted tiny" style="margin-top:9px">' +
-    (allAcc
-      ? '正在汇总全部设备的记录，变量名会带「设备名·」前缀。'
-      : '列表直接来自本地落盘记录，不发平台请求；可以按站名、编号或账号搜索。') +
-    '</div>' +
+    esc(hDevLabel || '点击搜索站名') + '</span><span class="ar">›</span></button>' +
     '<div class="row" style="margin-top:10px">' +
-    '<button class="sm" id="hAll">全部设备汇总</button>' +
-    (hDevLabel ? '<button class="sm" id="hSwap">换一台设备</button>' : '') +
+    '<button class="sm' + (hSource === 'cloud' ? ' pri' : '') + '" id="hSrcCloud">云端</button>' +
+    '<button class="sm' + (hSource === 'local' ? ' pri' : '') + '" id="hSrcLocal">本地</button>' +
+    '<button class="sm pri" id="hRefresh">↻ 获取数据</button>' +
+    '</div>' +
+    '<div class="muted tiny" style="margin-top:9px">' +
+    (hSource === 'cloud'
+      ? '默认从有人云读取，边输站名边搜，点一台即出图。'
+      : '本地落盘记录备用；监控跑过才会有数据。') +
     '</div></div>';
 
   /* 结果区 */
@@ -68,8 +67,10 @@ function histResultHtml() {
   var vars = r.vars || [];
   if (!vars.length || !r.count) {
     return '<div class="card"><div class="empty">' +
-      (hAcc === '' ? '全部账号在所选范围内没有历史数据' : '该设备在所选范围内没有历史数据') +
-      '<br><span class="tiny">本地记录需要先启动「监控」并跑过巡检' +
+      '这台设备在所选范围内没有历史数据' +
+      '<br><span class="tiny">' +
+      (hSource === 'cloud' ? '云端只保留最近一段时间的记录，可缩小范围或换本地来源试试'
+                           : '本地记录需要先启动「监控」并跑过巡检') +
       '</span></div></div>';
   }
   var keys = Object.keys(r.series || {});
@@ -87,18 +88,16 @@ function histResultHtml() {
      之后用户把它们全点掉，就该真的什么都不显示。 */
   hInit = true;
 
-  /* 全部账号汇总时变量会非常多，只列出前若干个，避免刷屏 */
+  /* 一台设备最多十几个变量，但历史点数多；这里仍限制显示的曲线数避免刷屏 */
   var shown = keys.slice(0, 60);
-  var title = (hAcc === '')
-      ? '全部账号'
-      : (G.histName || G.histNo || '');
+  var title = G.histName || r.devName || G.histNo || '';
   var s = '<div class="card"><h2>' + esc(title) +
     '<span class="r">' + r.count + ' 个变量 · ' + r.hours + '小时 · ' +
-    '本地</span></h2>';
+    (r.source === 'cloud' ? '云端' : '本地') + '</span></h2>';
 
   if (keys.length > shown.length) {
     s += '<div class="bar w" style="margin-bottom:10px">⚠ 共 ' + keys.length +
-      ' 个变量，图表只列前 ' + shown.length + ' 个。请缩小时间范围或指定单个账号。</div>';
+      ' 个变量，图表只列前 ' + shown.length + ' 个。</div>';
   }
   /* 图表放在变量选项上面：先看图，再决定要看哪几条线，不用往下翻 */
   s += '<canvas class="cv" id="hCv" width="700" height="300"></canvas>';
@@ -132,28 +131,29 @@ function bindHist() {
     };
   });
 
-  /* 【v0.28】本地：一步打开设备列表，点中即查 */
+  /* 【v0.40.07】选设备：点框弹出实时站名搜索（云端/本地共用列表） */
   var pk = el('hPick');
-  if (pk) pk.onclick = pickLocalDevice;
-
-  var sw = el('hSwap');
-  if (sw) sw.onclick = pickLocalDevice;
-
-  var ha = el('hAll');
-  if (ha) ha.onclick = function () {
-    hAcc = '';
-    hDevLabel = '';
-    G.histAcc = null;
-    G.histNo = null;
-    G.hist = null;
-    hOn = {};
-    hInit = false;
-    V_hist();
-    doQuery();
+  if (pk) pk.onclick = function () {
+    if (hSource === 'cloud') pickCloudDevice(); else pickLocalDevice();
   };
 
-  /* 【v0.33 修订六】删「查询曲线」按钮 —— 云端来源移除后，
-     本地模式点中设备即查，不再需要单独的查询确认键。 */
+  /* 来源切换：云端 / 本地。切换后清掉旧结果，避免显示上一次来源的曲线 */
+  var sc = el('hSrcCloud');
+  if (sc) sc.onclick = function () {
+    if (hSource === 'cloud') return;
+    hSource = 'cloud'; hAcc = null; G.hist = null; hOn = {}; hInit = false;
+    V_hist();
+  };
+  var sl = el('hSrcLocal');
+  if (sl) sl.onclick = function () {
+    if (hSource === 'local') return;
+    hSource = 'local'; hAcc = null; G.hist = null; hOn = {}; hInit = false;
+    V_hist();
+  };
+
+  /* 获取数据/刷新：没换站名时也能重新拉一次当前设备 */
+  var rf = el('hRefresh');
+  if (rf) rf.onclick = function () { doQuery(); };
 
   m.querySelectorAll('[data-var]').forEach(function (n) {
     n.onclick = function () {
@@ -215,6 +215,83 @@ function bindHist() {
   };
 
   drawChart();
+}
+
+/* 【v0.40.07】云端设备实时搜索：拉取平台设备清单一次并缓存，
+   输入站名/编号即时筛选，点一台直接查历史。不走后端 histDevs（那是本地 CSV）。 */
+function pickCloudDevice() {
+  var acc = (G.accounts || []).filter(function (a) { return a.enabled !== false; })[0];
+  if (!acc) {
+    openBox('选择设备', '<div class="empty">还没有账号<br><span class="tiny">先到「我的」添加账号</span></div>', null);
+    return;
+  }
+  function itemHtml(d) {
+    return '<div class="item' + (d.no === G.histNo ? ' on' : '') + '" data-cn="' + esc(d.no) +
+      '" data-cname="' + esc(d.name || '') + '">' +
+      '<div class="t">' + esc(d.name || d.no) + '</div>' +
+      '<div class="s mono tiny">' + esc(d.no) + '</div></div>';
+  }
+  function listHtml(kw) {
+    var ds = hCloudDevs || [];
+    if (kw) {
+      var q = kw.toLowerCase();
+      ds = ds.filter(function (d) {
+        return ((d.name || '') + ' ' + (d.no || '')).toLowerCase().indexOf(q) >= 0;
+      });
+    }
+    if (!ds.length) {
+      return '<div class="empty">' + (kw ? '没有匹配「' + esc(kw) + '」的站点' : '云端设备清单为空') + '</div>';
+    }
+    return ds.slice(0, 80).map(itemHtml).join('');
+  }
+  function paint() {
+    var box = el('cdL');
+    if (!box) return;
+    box.innerHTML = listHtml(hCloudKw);
+    var cnt = el('cdCnt');
+    if (cnt) cnt.textContent = hCloudKw
+      ? ('匹配 ' + box.querySelectorAll('[data-cn]').length + ' 台')
+      : ('共 ' + (hCloudDevs || []).length + ' 台，输入站名实时筛选');
+    box.querySelectorAll('[data-cn]').forEach(function (n) {
+      n.onclick = function () {
+        G.histNo = n.getAttribute('data-cn');
+        G.histName = n.getAttribute('data-cname') || '';
+        hAcc = acc.name;
+        G.histAcc = acc.name;
+        hDevLabel = G.histName || G.histNo;
+        closeBox();
+        V_hist();
+        doQuery();
+      };
+    });
+  }
+
+  openBox('选择设备（云端）',
+    '<input id="cdKw" placeholder="输入站名实时搜索" autocomplete="off" value="' + esc(hCloudKw) + '">' +
+    '<div class="tiny muted" id="cdCnt" style="margin:7px 0 9px">正在读取设备清单…</div>' +
+    '<div id="cdL" style="max-height:46vh;overflow:auto"></div>' +
+    '<div class="two" style="margin-top:12px"><button data-no>关闭</button>' +
+    '<button class="pri" id="cdReload">重新读取</button></div>',
+    null);
+
+  var inp = el('cdKw');
+  if (inp) inp.oninput = function () { hCloudKw = this.value.trim(); paint(); };
+  var rl = el('cdReload');
+  if (rl) rl.onclick = function () { hCloudDevs = null; load(); };
+
+  function load() {
+    if (hCloudDevs) { paint(); return; }
+    setTimeout(function () {
+      var r = api('histCloudDevs', { acc: acc.name });
+      hCloudDevs = (r && r.devs) || [];
+      paint();
+      if (!hCloudDevs.length) {
+        var c = el('cdCnt');
+        if (c) c.textContent = '读取失败：' + ((r && r.error) || '没有设备');
+      }
+    }, 30);
+  }
+  load();
 }
 
 /* 设备列表项 HTML。抽成函数是为了搜索时能原样重画，不用两套写法。 */
@@ -289,19 +366,24 @@ function pickLocalDevice() {
 }
 
 function doQuery() {
-  /* 全部账号：acc='' 、no=''，后端跨账号汇总 */
-  if (hAcc === null) { toast('先选账号'); return; }
-  if (hAcc !== '' && !G.histNo) { toast('先选设备'); return; }
+  /* 【v0.40.07】默认云端按设备查询；本地作备用。两者都要先选一台设备
+     （云端只取一个站点，不做跨站汇总）。 */
+  if (!G.histNo) { toast('先搜索并选中一台设备'); return; }
+  var acc = hAcc || (G.accounts || []).filter(function (a) { return a.enabled !== false; })[0];
+  if (!acc || acc === '') { toast('先选账号'); return; }
   var box = el('hRes');
-  if (box) box.innerHTML = '<div class="card"><div class="empty">查询中…</div></div>';
+  if (box) box.innerHTML = '<div class="card"><div class="empty">' +
+    (hSource === 'cloud' ? '正在从云端读取…' : '正在读取本地记录…') + '</div></div>';
+  var stamp = (G.histStamp = (G.histStamp || 0) + 1);
   setTimeout(function () {
-    /* 【v0.33 修订六】src 参数去掉云端分支 —— 平台历史接口已 404，
-       只剩本地记录一种来源。 */
-    var r = api('histGet', {
-      acc: hAcc === '' ? '' : G.histAcc, no: hAcc === '' ? '' : G.histNo,
-      hours: hHours
-    });
-    /* 查询期间用户可能已经切走，别覆盖当前页 */
+    /* 拉取期间用户又点了别的设备/切换了来源，丢弃这次过期结果 */
+    if (stamp !== G.histStamp) return;
+    var r;
+    if (hSource === 'cloud') {
+      r = api('histCloud', { acc: acc.name || acc, no: G.histNo, hours: hHours });
+    } else {
+      r = api('histGet', { acc: acc.name || acc, no: G.histNo, hours: hHours });
+    }
     if (G.tab !== 'hist') return;
     G.hist = r;
     hOn = {};
@@ -309,9 +391,8 @@ function doQuery() {
     var box2 = el('hRes');
     if (box2) box2.innerHTML = histResultHtml();
     bindHist();
-    var keys = Object.keys((r && r.series) || {});
-    toast(r.ok && r.count ? ('查到 ' + r.count + ' 个变量') :
-      (r.error || '没有数据'));
+    toast(r && r.ok && r.count ? ('查到 ' + r.count + ' 个变量') :
+      ((r && r.error) || '没有数据'));
   }, 30);
 }
 
@@ -581,9 +662,21 @@ function drawChart() {
     g.fillText(fmtT(t), x, padT + ih + 7);
   }
 
+  /* 【v0.40.07】降采样：云端一次能返回近万点，但画布只有 700px 宽，
+     每像素画十几个点既看不见又拖慢。按 2 点/像素等间隔抽稀，
+     首尾两点必留（末点要在图例显示当前值）。
+     这是渲染层的固有问题，换云端也要做。 */
+  function thin(pts) {
+    var cap = Math.max(2, iw * 2);
+    if (pts.length <= cap) return pts;
+    var out = [], step = (pts.length - 1) / (cap - 1);
+    for (var i = 0; i < cap; i++) out.push(pts[Math.round(i * step)]);
+    return out;
+  }
+
   /* 曲线 */
   keys.forEach(function (k) {
-    var pts = series[k] || [];
+    var pts = thin(series[k] || []);
     if (!pts.length) return;
     var c = PAL[Object.keys(series).indexOf(k) % PAL.length];
     g.strokeStyle = c;

@@ -44,7 +44,7 @@ public class Core {
        改一处两边同时生效。 */
     public static volatile int STALE_MINUTES = 15;
     public static final int MAX_CARDS = 10;
-    public static final String APP_VERSION = "0.40.06";
+    public static final String APP_VERSION = "0.40.07";
     /* 【v0.36 修订五】打包时刻（build.gradle 注入）。
        版本号不动，光看 v0.36 分不清装的是哪一次打包的包，这个问题页面上要能看出来。 */
     public static final String BUILD_STAMP = BuildConfig.BUILD_STAMP;
@@ -260,6 +260,17 @@ public class Core {
     }
 
     // ---------------- HTTP / JSON ----------------
+
+    /** 【v0.40.07】历史页云端查询专用：把包内私有的 apiJson 暴露给 Hist。
+        只加这一层薄包装，不动原有私有方法，避免影响监控/登录链路。 */
+    public static JSONObject apiJsonForHist(String url, JSONObject payload, String tok, int timeout)
+            throws Exception {
+        return apiJson(url, payload, tok, timeout);
+    }
+
+    /** 历史服务地址接口（官方文档 cloud.usr.cn/document/821）。 */
+    public static final String HIST_ADDR_URL =
+            "https://openapi.mp.usr.cn/usrCloud/V6/ucloudSdk/getHistoryServerAddress";
 
     private static JSONObject apiJson(String url, JSONObject payload, String tok, int timeout)
             throws Exception {
