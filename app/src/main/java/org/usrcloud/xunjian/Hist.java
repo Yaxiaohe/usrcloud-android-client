@@ -294,7 +294,9 @@ public class Hist {
         return Core.apiJsonForHist(url, body, tok, 40);
     }
 
-    /** 某个账号下的设备列表，供前端实时搜索站名。返回 JSONArray[{no,name}]。 */
+    /** 某个账号下的设备列表，供前端实时搜索站名。返回 JSONArray[{no,name}]。
+        【v0.40.09】套用该账号的站点过滤（和巡站同一口径 matchesStation）：
+        API 只返回这个账号该管的站。否则历史页会列出巡站根本不巡的设备。 */
     public static JSONArray cloudDevices(String accName) {
         JSONArray out = new JSONArray();
         try {
@@ -305,12 +307,19 @@ public class Hist {
             if (a == null) return out;
             String tok = Core.ensureLogin(a);
             List<Core.Dev> devs = Core.getDevices(tok);
+            int total = devs.size(), kept = 0;
             for (Core.Dev d : devs) {
+                /* hasFilter=false 时 matchesStation 恒 true，等于不过滤 */
+                if (!a.matchesStation(d.name)) continue;
+                kept++;
                 JSONObject o = new JSONObject();
                 o.put("no", d.no);
                 o.put("name", d.name);
                 o.put("acc", a.name);
                 out.put(o);
+            }
+            if (a.hasFilter()) {
+                Core.log("[历史云] " + a.name + " 站点过滤: 保留 " + kept + " / 共 " + total + " 台");
             }
         } catch (Exception e) {
             Core.log("[历史云] 取设备失败: " + e.getMessage());

@@ -44,7 +44,7 @@ public class Core {
        改一处两边同时生效。 */
     public static volatile int STALE_MINUTES = 15;
     public static final int MAX_CARDS = 10;
-    public static final String APP_VERSION = "0.40.08";
+    public static final String APP_VERSION = "0.40.09";
     /* 【v0.36 修订五】打包时刻（build.gradle 注入）。
        版本号不动，光看 v0.36 分不清装的是哪一次打包的包，这个问题页面上要能看出来。 */
     public static final String BUILD_STAMP = BuildConfig.BUILD_STAMP;
@@ -1812,14 +1812,9 @@ public class Core {
                         List<Dev> kept = new ArrayList<>();
                         List<String> miss = new ArrayList<>();
                         for (Dev d : devs) {
-                            boolean hit = false;
-                            for (String k : kws) {
-                                if (d.name != null && d.name.contains(k)) {
-                                    hit = true;
-                                    break;
-                                }
-                            }
-                            if (hit) kept.add(d);
+                            /* 【v0.40.09】和历史页共用 Account.matchesStation，
+                               口径只有一处，改了这边那边不会再漏。 */
+                            if (cfg.matchesStation(d.name)) kept.add(d);
                         }
                         for (String k : kws) {
                             boolean any = false;
