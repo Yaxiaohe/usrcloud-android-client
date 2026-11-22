@@ -100,11 +100,12 @@ function histResultHtml() {
       ' 个变量，图表只列前 ' + shown.length + ' 个。</div>';
   }
   /* 图表放在变量选项上面：先看图，再决定要看哪几条线，不用往下翻 */
-  s += '<canvas class="cv" id="hCv" width="700" height="300"></canvas>';
+  s += '<div class="hcvwrap"><canvas class="cv" id="hCv" width="700" height="300"></canvas>' +
+    '<div class="htip" id="hTip" hidden></div></div>';
   s += '<div class="lg" id="hLg"></div>';
   s += '<div class="muted tiny" style="margin-top:9px" id="hAx"></div>';
 
-  s += '<div class="muted tiny" style="margin:14px 0 8px">点变量名可显示/隐藏曲线' +
+  s += '<div class="muted tiny" style="margin:14px 0 8px">点曲线或时间轴看该点时间和数值；点变量名可显示/隐藏曲线' +
     (keys.length > shown.length ? '（仅前 ' + shown.length + ' 个）' : '') + '</div>';
   s += '<div class="row wrap">';
   shown.forEach(function (k) {
@@ -600,6 +601,11 @@ function activeCurves(seriesIn) {
 function drawChart() {
   var cv = el('hCv');
   if (!cv || !G.hist) return;
+  /* 【v0.40.10】重绘（换曲线/换设备/换时间）时先收起上一次的点选提示，
+     否则提示还停在旧时间点，和图对不上。 */
+  var tipOld = el('hTip');
+  if (tipOld) { tipOld.hidden = true; tipOld.innerHTML = ''; }
+  cv.onclick = null;
   var series = G.hist.series || {};
   var keys = activeCurves();
 
@@ -732,6 +738,84 @@ function drawChart() {
   var ax = el('hAx');
   if (ax) ax.textContent = fmtT(tMin) + '　至　' + fmtT(tMax) + '　共 ' +
     keys.length + ' 条曲线';
+
+  /* 【v0.40.10】点曲线 / 时间轴看该点数据。
+     原图只有末点值写在图例里，点图上任意位置没有任何反应——用户要看
+     「12:00 那一时刻各变量是多少」，这里补上：
+       · 时间轴就在同一块 canvas 内（padB=30 那一条），所以点 x 即可，不挑 y；
+       · CSS 把 canvas 缩到屏宽，必须按 rect.width 把点击 x 换回 700 画布坐标，
+         否则在窄屏上点中间只命中左边 1/4 的位置；
+       · 每条曲线取离该时刻最近的**真实采样点**（不插值、不造数），
+         提示框的时间取主曲线那一时刻；某条线缺这个点时显示它自己的最近点时刻，
+         绝不假装它和主曲线同一时刻。 */
+  cv.onclick = function (e) {
+    var rect = cv.getBoundingClientRect ? cv.getBoundingClientRect() : null;
+    var rw = (rect && rect.width) || W;
+    var rl = (rect && rect.left) || 0;
+    var cx = (e.clientX == null) ? padL : (e.clientX - rl) * W / rw;
+    if (!isFinite(cx)) cx = padL;
+    if (cx < padL) cx = padL;
+    if (cx > W - padR) cx = W - padR;
+    var tc = tMin + (cx - padL) / iw * (tMax - tMin);
+
+    var rows = [];
+    keys.forEach(function (k) {
+      var pts = series[k] || [], best = null, bd = Infinity;
+      for (var i = 0; i < pts.length; i++) {
+        var dd = Math.abs(pts[i][0] - tc);
+        if (dd < bd) { bd = dd; best = pts[i]; }
+      }
+      if (best) {
+        rows.push({ k: k, t: best[0], v: best[1], x: X(best[0]), y: Y(best[1]),
+          idx: Object.keys(series).indexOf(k) % PAL.length });
+      }
+    });
+    if (!rows.length) return;
+
+    /* 【v0.40.11】每次点击先把底图重画一遍，擦掉上一次的竖线/圆点。
+       原来是直接往画布上叠加 —— 点几次就留几条竖线（用户装了 0.40.10
+       后截图反馈「点击一次就多一个竖线」）。重绘会清空提示框并把 onclick
+       重绑到新闭包，当前这次点击继续用旧闭包执行完，不受影响。
+       重绘用的数据、时间范围和这里算 rows 的完全是同一份，坐标不会错位。 */
+    drawChart();
+
+    /* 画布：竖线 + 每条线命中点（画在刚重绘好的底图上，只此一条） */
+    g.save();
+    g.beginPath();
+    g.moveTo(cx, padT);
+    g.lineTo(cx, padT + ih);
+    g.strokeStyle = '#b9c2d0';
+    g.lineWidth = 1;
+    g.stroke();
+    rows.forEach(function (r) {
+      g.beginPath();
+      g.arc(r.x, r.y, 4, 0, 6.284);
+      g.fillStyle = PAL[r.idx];
+      g.fill();
+      g.strokeStyle = '#fff';
+      g.lineWidth = 1.5;
+      g.stroke();
+    });
+    g.restore();
+
+    var tip = el('hTip');
+    if (!tip) return;
+    tip.innerHTML = '<b>' + fmtT(rows[0].t) + '</b>' + rows.map(function (r) {
+      var u = '';
+      (G.hist.vars || []).forEach(function (v) { if (v.name === r.k) u = v.unit || ''; });
+      /* 时间点与主曲线不同的线，行内补自己的时刻，避免张冠李戴 */
+      var mark = Math.abs(r.t - rows[0].t) > 60000 ? ' <em>' + fmtT(r.t) + '</em>' : '';
+      return '<i><em style="color:' + PAL[r.idx] + '">■</em>' + esc(r.k) +
+        (u ? '(' + esc(u) + ')' : '') + '　' + fmtV(r.v) + mark + '</i>';
+    }).join('');
+    tip.hidden = false;
+    var tw = tip.offsetWidth || 170;
+    var px = cx * rw / W;
+    var left = px + 12;
+    if (left + tw > rw) left = px - tw - 12;
+    if (left < 4) left = 4;
+    tip.style.left = left + 'px';
+  };
 }
 
 function fmtV(v) {
